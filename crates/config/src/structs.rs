@@ -280,6 +280,25 @@ pub struct EvaluatorConfig {
   /// `"auto"` keeps what connected agents advertise, and [`None`] keeps
   /// everything.
   pub systems: Option<EvaluatorSystems>,
+
+  /// Credentials for checking `s3://` substituters. A path one of the Nix
+  /// substituters already serves needs no build of its own; without these,
+  /// only `http(s)://` substituters are checked.
+  pub s3_substituters: Option<S3SubstituterCredentials>,
+}
+
+/// Credentials the evaluator signs `s3://` substituter lookups with. Bucket,
+/// endpoint, region and scheme come from each substituter URL.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct S3SubstituterCredentials {
+  pub access_key_id:          Option<String>,
+  pub secret_access_key:      Option<String>,
+  /// Path to a file containing the secret access key.
+  pub secret_access_key_file: Option<PathBuf>,
+  pub session_token:          Option<String>,
+  /// Path to a file containing the session token.
+  pub session_token_file:     Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -960,6 +979,7 @@ impl Default for EvaluatorConfig {
       eval_workers:         4,
       memory_limit_mb:      None,
       systems:              None,
+      s3_substituters:      None,
     }
   }
 }

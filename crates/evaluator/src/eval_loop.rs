@@ -579,6 +579,7 @@ async fn run_nix_and_record_builds(
     eval.id,
     MemoryLimit::from(config),
     allowed_systems.as_ref(),
+    config.s3_substituters.as_ref(),
   )
   .await?;
   let project = repo::projects::get(pool, jobset.project_id)

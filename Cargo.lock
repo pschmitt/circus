@@ -633,6 +633,7 @@ dependencies = [
  "circus-migrations",
  "circus-nix",
  "circus-notification",
+ "circus-s3",
  "data-encoding",
  "evix",
  "futures",

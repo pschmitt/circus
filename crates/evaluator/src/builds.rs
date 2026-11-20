@@ -17,9 +17,13 @@ use circus_common::{
   repo,
   systems::system_allowed,
 };
+use circus_config::S3SubstituterCredentials;
+use circus_s3::{Credentials as S3Credentials, Presigner};
 use data_encoding::HEXLOWER;
 use futures::stream::{self, StreamExt};
+use jiff::Timestamp;
 use tokio::process::Command;
+use url::Url;
 use uuid::Uuid;
 
 use crate::{memory::MemoryLimit, nix::NixJob};
@@ -137,7 +141,7 @@ async fn show_derivations(
 /// enqueued.
 async fn invalid_output_paths<'a>(
   derivations: impl Iterator<Item = &'a DerivationInfo>,
-  substituters: &[String],
+  substituters: &[Substituter],
   memory_limit: MemoryLimit,
 ) -> HashSet<String> {
   let paths = derivations
@@ -177,8 +181,98 @@ async fn invalid_output_paths<'a>(
   invalid
 }
 
-/// The HTTP binary caches this host's Nix substitutes from.
-async fn http_substituters(memory_limit: MemoryLimit) -> Vec<String> {
+/// A binary cache the evaluator checks for outputs that need no build.
+#[derive(Clone, Debug)]
+pub(crate) enum Substituter {
+  /// `http(s)://` cache, checked with an anonymous `HEAD` of the narinfo.
+  Http(String),
+  /// `s3://` cache, checked with a presigned `HEAD` of the narinfo.
+  S3(Presigner),
+}
+
+impl Substituter {
+  /// Parse one entry of Nix's `substituters` setting. `s3://` caches are
+  /// only checked when credentials are configured; other store types (and
+  /// unparsable entries) are skipped.
+  fn parse(url: &str, s3: Option<&S3SubstituterCredentials>) -> Option<Self> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+      // Query parameters are store settings like `priority`.
+      let base = url.split_once('?').map_or(url, |(base, _)| base);
+      return Some(Self::Http(base.trim_end_matches('/').to_owned()));
+    }
+    if url.starts_with("s3://") {
+      return s3_presigner(url, s3?).map(Self::S3);
+    }
+    None
+  }
+
+  /// URL whose `HEAD` succeeds when the cache has `hash.narinfo`.
+  fn narinfo_url(&self, hash: &str, now: Timestamp) -> String {
+    match self {
+      Self::Http(base) => format!("{base}/{hash}.narinfo"),
+      Self::S3(presigner) => {
+        presigner.presign_at(
+          "HEAD",
+          &format!("{hash}.narinfo"),
+          Duration::from_secs(300),
+          now,
+        )
+      },
+    }
+  }
+}
+
+/// A presigner for a Nix `s3://bucket[/prefix]?endpoint=…&region=…` store
+/// URL, signing with `credentials` (the URL's `profile` is not consulted).
+fn s3_presigner(
+  url: &str,
+  credentials: &S3SubstituterCredentials,
+) -> Option<Presigner> {
+  let parsed = Url::parse(url).ok()?;
+  let bucket = parsed.host_str().filter(|host| !host.is_empty())?;
+  let prefix = Some(parsed.path().trim_matches('/'))
+    .filter(|prefix| !prefix.is_empty())
+    .map(str::to_owned);
+  let param = |name: &str| {
+    parsed
+      .query_pairs()
+      .find(|(key, _)| key == name)
+      .map(|(_, value)| value.into_owned())
+  };
+  let scheme = param("scheme").unwrap_or_else(|| "https".to_owned());
+  let endpoint_url = param("endpoint").map(|endpoint| {
+    if endpoint.contains("://") {
+      endpoint
+    } else {
+      format!("{scheme}://{endpoint}")
+    }
+  });
+  // Nix addresses custom endpoints path-style unless told otherwise.
+  let use_path_style = match param("addressing-style").as_deref() {
+    Some("virtual") => false,
+    Some("path") => true,
+    _ => endpoint_url.is_some(),
+  };
+  Some(Presigner {
+    credentials: S3Credentials {
+      access_key:    credentials.access_key_id.clone()?,
+      secret_key:    credentials.secret_access_key.clone()?,
+      session_token: credentials.session_token.clone(),
+    },
+    region: param("region").unwrap_or_else(|| "us-east-1".to_owned()),
+    bucket: bucket.to_owned(),
+    prefix,
+    endpoint_url,
+    use_path_style,
+  })
+}
+
+/// The binary caches this host's Nix substitutes from that the evaluator can
+/// check: `http(s)://` ones, and `s3://` ones when `s3` credentials are set.
+async fn nix_substituters(
+  memory_limit: MemoryLimit,
+  s3: Option<&S3SubstituterCredentials>,
+) -> Vec<Substituter> {
   let mut command = Command::new("nix");
   command
     .args(["config", "show", "substituters"])
@@ -191,10 +285,7 @@ async fn http_substituters(memory_limit: MemoryLimit) -> Vec<String> {
     Ok(output) if output.status.success() => {
       String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
-        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
-        // Query parameters are store settings like `priority`.
-        .map(|url| url.split_once('?').map_or(url, |(base, _)| base))
-        .map(|url| url.trim_end_matches('/').to_owned())
+        .filter_map(|url| Substituter::parse(url, s3))
         .collect()
     },
     Ok(output) => {
@@ -215,7 +306,7 @@ async fn http_substituters(memory_limit: MemoryLimit) -> Vec<String> {
 /// building them, so they need no build of their own.
 async fn substitutable(
   paths: &HashSet<String>,
-  substituters: &[String],
+  substituters: &[Substituter],
 ) -> Vec<String> {
   if paths.is_empty() || substituters.is_empty() {
     return Vec::new();
@@ -242,8 +333,9 @@ async fn substitutable(
           .and_then(|name| name.to_str())
           .and_then(|name| name.get(..32))?;
         for substituter in substituters {
+          // Errors and denials count as "not there": the path gets a build.
           let found = client
-            .head(format!("{substituter}/{hash}.narinfo"))
+            .head(substituter.narinfo_url(hash, Timestamp::now()))
             .send()
             .await
             .is_ok_and(|response| response.status().is_success());
@@ -361,7 +453,7 @@ pub(crate) struct BuildStream<'a> {
   dependencies:    HashMap<String, Uuid>,
   present:         HashSet<String>,
   touched:         HashSet<Uuid>,
-  substituters:    Vec<String>,
+  substituters:    Vec<Substituter>,
   aggregates:      Vec<NixJob>,
   dropped:         usize,
 }
@@ -374,6 +466,7 @@ impl<'a> BuildStream<'a> {
     eval_id: Uuid,
     memory_limit: MemoryLimit,
     allowed_systems: Option<&'a HashSet<String>>,
+    s3_substituters: Option<&S3SubstituterCredentials>,
   ) -> misstep::Result<Self> {
     let mut drv_to_build = HashMap::new();
     let mut name_to_build = HashMap::new();
@@ -399,7 +492,7 @@ impl<'a> BuildStream<'a> {
       dependencies,
       present: HashSet::new(),
       touched: HashSet::new(),
-      substituters: http_substituters(memory_limit).await,
+      substituters: nix_substituters(memory_limit, s3_substituters).await,
       aggregates: Vec::new(),
       dropped: 0,
     })
@@ -813,7 +906,7 @@ mod tests {
   }
 
   async fn open(pool: &PgPool, eval_id: Uuid) -> BuildStream<'_> {
-    BuildStream::open(pool, eval_id, MemoryLimit::new(None), None)
+    BuildStream::open(pool, eval_id, MemoryLimit::new(None), None, None)
       .await
       .expect("open stream")
   }
@@ -932,5 +1025,80 @@ mod tests {
       .await
       .expect("get evaluation");
     assert_eq!(evaluation.status, EvaluationStatus::Completed);
+  }
+}
+
+#[cfg(test)]
+mod substituter_tests {
+  use circus_config::S3SubstituterCredentials;
+  use jiff::Timestamp;
+
+  use super::Substituter;
+
+  const NIKS3: &str = "s3://nix-cache-brkn-lol?endpoint=s3.example.org&\
+                       profile=niks3&region=default&scheme=https";
+
+  fn credentials() -> S3SubstituterCredentials {
+    S3SubstituterCredentials {
+      access_key_id: Some("AKIDEXAMPLE".into()),
+      secret_access_key: Some("secret".into()),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn http_substituter_drops_store_settings() {
+    let substituter =
+      Substituter::parse("https://cache.nixos.org/?priority=40", None);
+    assert!(matches!(
+      substituter,
+      Some(Substituter::Http(ref base)) if base == "https://cache.nixos.org"
+    ));
+  }
+
+  #[test]
+  fn s3_substituter_needs_credentials() {
+    assert!(Substituter::parse(NIKS3, None).is_none());
+    assert!(
+      Substituter::parse(NIKS3, Some(&S3SubstituterCredentials::default()))
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn s3_substituter_uses_url_parameters() {
+    let substituter = Substituter::parse(NIKS3, Some(&credentials()));
+    assert!(matches!(
+      &substituter,
+      Some(Substituter::S3(presigner))
+        if presigner.bucket == "nix-cache-brkn-lol"
+          && presigner.region == "default"
+          && presigner.endpoint_url.as_deref() == Some("https://s3.example.org")
+          && presigner.use_path_style
+          && presigner.prefix.is_none()
+    ));
+  }
+
+  #[test]
+  fn s3_narinfo_url_is_a_presigned_head() {
+    let substituter =
+      Substituter::parse(NIKS3, Some(&credentials())).expect("s3 substituter");
+    let url = substituter.narinfo_url(
+      "0123456789abcdfghijklmnpqrsvwxyz",
+      Timestamp::from_second(1_800_000_000).expect("timestamp"),
+    );
+    assert!(url.starts_with(
+      "https://s3.example.org/nix-cache-brkn-lol/0123456789abcdfghijklmnpqrsvwxyz.narinfo?"
+    ));
+    assert!(url.contains("X-Amz-Signature="));
+    assert!(url.contains("AKIDEXAMPLE"));
+  }
+
+  #[test]
+  fn other_store_types_are_skipped() {
+    assert!(
+      Substituter::parse("ssh-ng://builder", Some(&credentials())).is_none()
+    );
+    assert!(Substituter::parse("daemon", Some(&credentials())).is_none());
   }
 }

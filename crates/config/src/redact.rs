@@ -8,6 +8,7 @@ use crate::{
   NotificationsConfig,
   OidcProviderConfig,
   S3CacheConfig,
+  S3SubstituterCredentials,
   SlackNotificationConfig,
 };
 
@@ -122,6 +123,14 @@ redact_debug!(S3CacheConfig {
   session_token_file:     visible,
   endpoint_url:           visible,
   use_path_style:         visible,
+});
+
+redact_debug!(S3SubstituterCredentials {
+  access_key_id:          visible,
+  secret_access_key:      optional_secret,
+  secret_access_key_file: visible,
+  session_token:          optional_secret,
+  session_token_file:     visible,
 });
 
 redact_debug!(DeclarativeWebhook {

@@ -108,6 +108,11 @@ impl Config {
       }
     }
 
+    if let Some(ref mut s3) = self.evaluator.s3_substituters {
+      resolve_optional!(s3.secret_access_key, s3.secret_access_key_file);
+      resolve_optional!(s3.session_token, s3.session_token_file);
+    }
+
     // email (nested inside notifications)
     if let Some(ref mut email) = self.notifications.email {
       resolve_optional!(email.smtp_password, email.smtp_password_file);
