@@ -13,6 +13,7 @@
 use std::{
   collections::BTreeMap,
   fmt::{Debug, Formatter, Result as FmtResult},
+  path::PathBuf,
 };
 
 use circus_common::{
@@ -40,18 +41,65 @@ const SIGNATURE_HEADER: &str = "X-Circus-Signature";
 const RESERVED_HEADERS: &[&str] = &["content-type", SIGNATURE_HEADER];
 
 /// Generic outbound HTTPS webhook with optional HMAC signing and headers.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookChannel {
-  pub url:             String,
+  pub url:               String,
   /// HMAC-SHA256 signing key. Plaintext in memory, encrypted at rest.
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub secret:          Option<String>,
+  pub secret:            Option<String>,
   /// Extra static headers (e.g. `Authorization`). Values are encrypted at
   /// rest.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-  pub headers:         BTreeMap<String, String>,
+  pub headers:           BTreeMap<String, String>,
   #[serde(default)]
-  pub on_failure_only: bool,
+  pub on_failure_only:   bool,
+  /// File holding the HMAC-SHA256 signing key, read on every delivery so it
+  /// can rotate. Only allowed for the instance-level webhook: a project
+  /// config could otherwise make the server sign with any file it can read.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub secret_file:       Option<PathBuf>,
+  /// Deliver an event for every finished top-level build (default true).
+  #[serde(default = "default_true")]
+  pub build_events:      bool,
+  /// Deliver one event per evaluation once all its top-level jobs finished.
+  #[serde(default)]
+  pub evaluation_events: bool,
+}
+
+const fn default_true() -> bool {
+  true
+}
+
+impl Default for WebhookChannel {
+  fn default() -> Self {
+    Self {
+      url:               String::new(),
+      secret:            None,
+      headers:           BTreeMap::new(),
+      on_failure_only:   false,
+      secret_file:       None,
+      build_events:      true,
+      evaluation_events: false,
+    }
+  }
+}
+
+impl WebhookChannel {
+  /// The current signing key: the contents of `secret_file` when set (read
+  /// now, so a rotated key takes effect), else the stored `secret`.
+  pub(crate) fn signing_key(&self) -> Result<Option<String>, String> {
+    let Some(file) = &self.secret_file else {
+      return Ok(self.secret.clone());
+    };
+    let key = std::fs::read_to_string(file).map_err(|e| {
+      format!("Cannot read webhook secret file {}: {e}", file.display())
+    })?;
+    let key = key.trim_end_matches(['\n', '\r']).to_owned();
+    if key.is_empty() {
+      return Err(format!("Webhook secret file {} is empty", file.display()));
+    }
+    Ok(Some(key))
+  }
 }
 
 impl Debug for WebhookChannel {
@@ -59,8 +107,11 @@ impl Debug for WebhookChannel {
     f.debug_struct("WebhookChannel")
       .field("url", &self.url)
       .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+      .field("secret_file", &self.secret_file)
       .field("headers", &format!("{} header(s)", self.headers.len()))
       .field("on_failure_only", &self.on_failure_only)
+      .field("build_events", &self.build_events)
+      .field("evaluation_events", &self.evaluation_events)
       .finish()
   }
 }
@@ -395,6 +446,11 @@ impl NotificationChannel {
 
 impl StoredChannel for WebhookChannel {
   fn validate_stored(&self, origin: Origin) -> CiResult<()> {
+    if self.secret_file.is_some() && origin == Origin::Project {
+      return Err(CiError::Validation(
+        "webhook secret_file is only allowed in the instance config".into(),
+      ));
+    }
     validate_url(&self.url, origin, validate_https_webhook_url)
   }
 
@@ -552,6 +608,69 @@ mod tests {
 
   fn nt(s: &str) -> NotificationType {
     s.parse().unwrap()
+  }
+
+  #[test]
+  fn webhook_event_flags_default_to_build_events_only() {
+    let channel: WebhookChannel = serde_json::from_value(serde_json::json!({
+      "url": "https://hooks.example.com/ci",
+    }))
+    .unwrap();
+    assert!(channel.build_events);
+    assert!(!channel.evaluation_events);
+    assert!(channel.secret_file.is_none());
+  }
+
+  #[test]
+  fn webhook_secret_file_is_instance_only() {
+    let config = serde_json::json!({
+      "url": "https://hooks.example.com/ci",
+      "secret_file": "/etc/shadow",
+    });
+    let err = NotificationChannel::from_stored(
+      nt("webhook"),
+      &config,
+      KEY,
+      Origin::Project,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("secret_file"));
+    assert!(
+      NotificationChannel::from_stored(
+        nt("webhook"),
+        &config,
+        KEY,
+        Origin::Instance,
+      )
+      .is_ok()
+    );
+  }
+
+  #[test]
+  fn webhook_signing_key_rereads_secret_file() {
+    let dir = std::env::temp_dir()
+      .join(format!("circus-webhook-key-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("key");
+    std::fs::write(&file, "first\n").unwrap();
+    let channel = WebhookChannel {
+      url: "https://hooks.example.com/ci".into(),
+      secret: Some("inline".into()),
+      secret_file: Some(file.clone()),
+      ..WebhookChannel::default()
+    };
+    assert_eq!(channel.signing_key().unwrap().as_deref(), Some("first"));
+    std::fs::write(&file, "second").unwrap();
+    assert_eq!(channel.signing_key().unwrap().as_deref(), Some("second"));
+    std::fs::write(&file, "").unwrap();
+    assert!(channel.signing_key().is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let inline = WebhookChannel {
+      secret: Some("inline".into()),
+      ..WebhookChannel::default()
+    };
+    assert_eq!(inline.signing_key().unwrap().as_deref(), Some("inline"));
   }
 
   #[test]

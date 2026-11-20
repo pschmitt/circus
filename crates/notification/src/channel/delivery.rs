@@ -29,41 +29,29 @@ use super::{
 };
 use crate::{
   BuildEvent,
+  EvaluationEvent,
   parse_gitea_repo,
   parse_github_repo,
   parse_gitlab_project,
 };
 
-impl Notifier for WebhookChannel {
-  fn applies_to(&self, event: &BuildEvent) -> bool {
-    !self.on_failure_only || event.is_failure()
-  }
-
-  async fn deliver(
+impl WebhookChannel {
+  /// POST a JSON body, signed with the current key when one is configured.
+  async fn post_signed(
     &self,
-    event: &BuildEvent,
+    payload: &serde_json::Value,
     origin: Origin,
   ) -> Result<(), String> {
     let http = crate::http_client(origin);
-    let payload = serde_json::json!({
-      "build_id":     event.build_id,
-      "build_status": event.generic_status(),
-      "build_job":    event.job_name,
-      "build_drv":    event.drv_path,
-      "build_output": event.build_output.as_deref().unwrap_or(""),
-      "project_name": event.project_name,
-      "project_url":  event.project_url,
-      "commit_hash":  event.commit_hash,
-    });
-    let body = serde_json::to_vec(&payload)
+    let body = serde_json::to_vec(payload)
       .map_err(|e| format!("Failed to serialize webhook payload: {e}"))?;
 
     let mut req = http
       .post(&self.url)
       .header("Content-Type", "application/json");
 
-    if let Some(secret) = &self.secret {
-      req = req.header(SIGNATURE_HEADER, sign_body(secret, &body)?);
+    if let Some(secret) = self.signing_key()? {
+      req = req.header(SIGNATURE_HEADER, sign_body(&secret, &body)?);
     }
     for (name, value) in &self.headers {
       if RESERVED_HEADERS
@@ -81,6 +69,46 @@ impl Notifier for WebhookChannel {
       .send_checked()
       .await
       .map_err(|e| format!("Webhook failed: {}", ErrorChain(&e)))?;
+    Ok(())
+  }
+
+  /// Deliver an evaluation-finished event (see [`EvaluationEvent`]).
+  pub(crate) async fn deliver_evaluation(
+    &self,
+    event: &EvaluationEvent,
+    origin: Origin,
+  ) -> Result<(), String> {
+    self.post_signed(&event.webhook_payload(), origin).await?;
+    info!(
+      evaluation_id = %event.evaluation_id,
+      "Evaluation webhook notification sent"
+    );
+    Ok(())
+  }
+}
+
+impl Notifier for WebhookChannel {
+  fn applies_to(&self, event: &BuildEvent) -> bool {
+    self.build_events && (!self.on_failure_only || event.is_failure())
+  }
+
+  async fn deliver(
+    &self,
+    event: &BuildEvent,
+    origin: Origin,
+  ) -> Result<(), String> {
+    let payload = serde_json::json!({
+      "event":        "build_finished",
+      "build_id":     event.build_id,
+      "build_status": event.generic_status(),
+      "build_job":    event.job_name,
+      "build_drv":    event.drv_path,
+      "build_output": event.build_output.as_deref().unwrap_or(""),
+      "project_name": event.project_name,
+      "project_url":  event.project_url,
+      "commit_hash":  event.commit_hash,
+    });
+    self.post_signed(&payload, origin).await?;
     info!(build_id = %event.build_id, "Webhook notification sent");
     Ok(())
   }

@@ -270,6 +270,34 @@ pub async fn list_for_evaluation(
   rows.into_iter().map(Build::try_from).collect()
 }
 
+/// Count an evaluation's top-level jobs by status. Dependency builds
+/// synthesized from the derivation graph (`drv:` jobs) are not counted.
+///
+/// # Errors
+///
+/// Returns error if the database query fails or a status is unknown.
+pub async fn job_status_counts(
+  pool: &PgPool,
+  evaluation_id: Uuid,
+) -> Result<Vec<(BuildStatus, i64)>> {
+  let client = pool.get().await?;
+  let rows = q::job_status_counts()
+    .bind(&client, &evaluation_id)
+    .all()
+    .await?;
+  rows
+    .into_iter()
+    .map(|row| {
+      let status = row.status.parse::<BuildStatus>().map_err(|error| {
+        CiError::Internal(format!(
+          "evaluation {evaluation_id} has a job with {error}"
+        ))
+      })?;
+      Ok((status, row.count))
+    })
+    .collect()
+}
+
 /// List builds for a jobset across a bounded set of evaluations.
 ///
 /// # Errors

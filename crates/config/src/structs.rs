@@ -389,36 +389,46 @@ fn default_groups_claim() -> String {
 // the per-field `#[serde(default = ...)]` annotations. `#[derive(Default)]`
 // would silently set `enable_retry_queue = false`, which is wrong.
 pub struct NotificationsConfig {
-  pub webhook_url:         Option<String>,
+  pub webhook_url:               Option<String>,
   /// Path to a file containing the generic webhook URL.
-  pub webhook_url_file:    Option<PathBuf>,
-  pub github_token:        Option<String>,
+  pub webhook_url_file:          Option<PathBuf>,
+  /// Path to a file containing the HMAC-SHA256 key for the generic webhook's
+  /// `X-Circus-Signature` header. Read on every delivery, so it can rotate.
+  pub webhook_secret_file:       Option<PathBuf>,
+  /// Send a generic webhook for every finished top-level build (default true).
+  #[serde(default = "default_true")]
+  pub webhook_build_events:      bool,
+  /// Send a generic webhook once per evaluation, when its last top-level job
+  /// has finished (default false).
+  #[serde(default)]
+  pub webhook_evaluation_events: bool,
+  pub github_token:              Option<String>,
   /// Path to a file containing the GitHub token.
-  pub github_token_file:   Option<PathBuf>,
-  pub gitea_url:           Option<String>,
-  pub gitea_token:         Option<String>,
+  pub github_token_file:         Option<PathBuf>,
+  pub gitea_url:                 Option<String>,
+  pub gitea_token:               Option<String>,
   /// Path to a file containing the Gitea token.
-  pub gitea_token_file:    Option<PathBuf>,
-  pub gitlab_url:          Option<String>,
-  pub gitlab_token:        Option<String>,
+  pub gitea_token_file:          Option<PathBuf>,
+  pub gitlab_url:                Option<String>,
+  pub gitlab_token:              Option<String>,
   /// Path to a file containing the GitLab token.
-  pub gitlab_token_file:   Option<PathBuf>,
-  pub email:               Option<EmailConfig>,
-  pub alerts:              Option<AlertConfig>,
+  pub gitlab_token_file:         Option<PathBuf>,
+  pub email:                     Option<EmailConfig>,
+  pub alerts:                    Option<AlertConfig>,
   /// Slack incoming webhook notification.
-  pub slack:               Option<SlackNotificationConfig>,
+  pub slack:                     Option<SlackNotificationConfig>,
   /// Enable notification retry queue (persistent, with exponential backoff)
   #[serde(default = "default_true")]
-  pub enable_retry_queue:  bool,
+  pub enable_retry_queue:        bool,
   /// Maximum retry attempts per notification (default 5)
   #[serde(default = "default_notification_max_attempts")]
-  pub max_retry_attempts:  i32,
+  pub max_retry_attempts:        i32,
   /// Retention period for old completed/failed tasks in days (default 7)
   #[serde(default = "default_notification_retention_days")]
-  pub retention_days:      i64,
+  pub retention_days:            i64,
   /// Polling interval for retry worker in seconds (default 5)
   #[serde(default = "default_notification_poll_interval")]
-  pub retry_poll_interval: u64,
+  pub retry_poll_interval:       u64,
 }
 
 impl NotificationsConfig {
@@ -481,23 +491,26 @@ fn current_token(
 impl Default for NotificationsConfig {
   fn default() -> Self {
     Self {
-      webhook_url:         None,
-      webhook_url_file:    None,
-      github_token:        None,
-      github_token_file:   None,
-      gitea_url:           None,
-      gitea_token:         None,
-      gitea_token_file:    None,
-      gitlab_url:          None,
-      gitlab_token:        None,
-      gitlab_token_file:   None,
-      email:               None,
-      alerts:              None,
-      slack:               None,
-      enable_retry_queue:  default_true(),
-      max_retry_attempts:  default_notification_max_attempts(),
-      retention_days:      default_notification_retention_days(),
-      retry_poll_interval: default_notification_poll_interval(),
+      webhook_url:               None,
+      webhook_url_file:          None,
+      webhook_secret_file:       None,
+      webhook_build_events:      default_true(),
+      webhook_evaluation_events: false,
+      github_token:              None,
+      github_token_file:         None,
+      gitea_url:                 None,
+      gitea_token:               None,
+      gitea_token_file:          None,
+      gitlab_url:                None,
+      gitlab_token:              None,
+      gitlab_token_file:         None,
+      email:                     None,
+      alerts:                    None,
+      slack:                     None,
+      enable_retry_queue:        default_true(),
+      max_retry_attempts:        default_notification_max_attempts(),
+      retention_days:            default_notification_retention_days(),
+      retry_poll_interval:       default_notification_poll_interval(),
     }
   }
 }

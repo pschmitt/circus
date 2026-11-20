@@ -1,4 +1,5 @@
 --: BuildRow(started_at?, completed_at?, log_path?, build_output_path?, error_message?, system?, notification_pending_since?, outputs?, constituents?, builder_id?, agent_machine_id?, fod_hash?, meta_description?, meta_license?, meta_homepage?, meta_maintainers?, started_notified_at?, effective_features?, closure_size?)
+--: JobStatusCountRow()
 
 --! create (system?, outputs?, constituents?, fod_hash?, meta_description?, meta_license?, meta_homepage?, meta_maintainers?) : BuildRow
 INSERT INTO builds (
@@ -496,3 +497,10 @@ CROSS JOIN LATERAL (
 WHERE cur.id = ANY(:ids)
 GROUP BY cur.id
 HAVING percentile_cont(0.5) WITHIN GROUP (ORDER BY past.secs) >= 1;
+
+--! job_status_counts : JobStatusCountRow
+SELECT status, COUNT(*) AS count
+FROM builds
+WHERE evaluation_id = :evaluation_id
+  AND job_name NOT LIKE 'drv:%'
+GROUP BY status;

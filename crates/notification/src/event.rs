@@ -177,3 +177,166 @@ mod tests {
     assert!(event_with_job("drv:abc-foo-1.0").is_dependency());
   }
 }
+
+/// How an evaluation's top-level jobs ended, counted by outcome.
+#[derive(
+  Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+pub struct JobSummary {
+  pub total:     i64,
+  pub succeeded: i64,
+  pub failed:    i64,
+  pub cancelled: i64,
+  pub skipped:   i64,
+}
+
+impl JobSummary {
+  /// Summarize per-status job counts. Returns `None` while any job is still
+  /// pending or running, i.e. while the evaluation is not finished yet.
+  #[must_use]
+  pub fn from_counts(counts: &[(BuildStatus, i64)]) -> Option<Self> {
+    let mut summary = Self::default();
+    for &(status, count) in counts {
+      if !status.is_finished() {
+        return None;
+      }
+      summary.total += count;
+      match status {
+        BuildStatus::Succeeded => summary.succeeded += count,
+        BuildStatus::Cancelled | BuildStatus::Aborted => {
+          summary.cancelled += count;
+        },
+        BuildStatus::UnsupportedSystem => summary.skipped += count,
+        _ => summary.failed += count,
+      }
+    }
+    Some(summary)
+  }
+
+  /// Coarse outcome of the whole evaluation: `success` only when every job
+  /// succeeded, `cancelled` when jobs were cancelled but none failed.
+  #[must_use]
+  pub const fn status(&self) -> &'static str {
+    if self.failed > 0 {
+      "failure"
+    } else if self.cancelled > 0 {
+      "cancelled"
+    } else if self.skipped > 0 {
+      "partial"
+    } else {
+      "success"
+    }
+  }
+}
+
+/// An evaluation whose top-level jobs have all finished. Sent to generic
+/// webhooks that opted into evaluation events; may be delivered more than
+/// once, so consumers deduplicate by `evaluation_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationEvent {
+  pub evaluation_id: Uuid,
+  pub project_name:  String,
+  pub project_url:   String,
+  pub jobset_name:   String,
+  pub commit_hash:   String,
+  /// The branch the evaluation is for: the pull request's head branch, else
+  /// the jobset's branch.
+  pub branch:        Option<String>,
+  pub pr_number:     Option<i32>,
+  pub source_scope:  Option<String>,
+  pub superseded_by: Option<Uuid>,
+  pub jobs:          JobSummary,
+}
+
+impl EvaluationEvent {
+  /// The JSON body of the generic webhook for this event.
+  #[must_use]
+  pub fn webhook_payload(&self) -> serde_json::Value {
+    serde_json::json!({
+      "event":         "evaluation_finished",
+      "evaluation_id": self.evaluation_id,
+      "status":        self.jobs.status(),
+      "jobs":          self.jobs,
+      "project_name":  self.project_name,
+      "project_url":   self.project_url,
+      "jobset_name":   self.jobset_name,
+      "commit_hash":   self.commit_hash,
+      "branch":        self.branch,
+      "pr_number":     self.pr_number,
+      "source_scope":  self.source_scope,
+      "superseded_by": self.superseded_by,
+    })
+  }
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+  use super::*;
+
+  #[test]
+  fn unfinished_jobs_mean_no_summary() {
+    let counts = [(BuildStatus::Succeeded, 3), (BuildStatus::Running, 1)];
+    assert_eq!(JobSummary::from_counts(&counts), None);
+    let counts = [(BuildStatus::Pending, 1)];
+    assert_eq!(JobSummary::from_counts(&counts), None);
+  }
+
+  #[test]
+  fn summary_counts_and_status() {
+    let ok = JobSummary::from_counts(&[(BuildStatus::Succeeded, 5)])
+      .unwrap_or_default();
+    assert_eq!(ok.total, 5);
+    assert_eq!(ok.status(), "success");
+
+    let mixed = JobSummary::from_counts(&[
+      (BuildStatus::Succeeded, 3),
+      (BuildStatus::Failed, 1),
+      (BuildStatus::Cancelled, 2),
+      (BuildStatus::UnsupportedSystem, 1),
+    ])
+    .unwrap_or_default();
+    assert_eq!(mixed, JobSummary {
+      total:     7,
+      succeeded: 3,
+      failed:    1,
+      cancelled: 2,
+      skipped:   1,
+    });
+    assert_eq!(mixed.status(), "failure");
+
+    let cancelled = JobSummary::from_counts(&[
+      (BuildStatus::Succeeded, 1),
+      (BuildStatus::Aborted, 1),
+    ])
+    .unwrap_or_default();
+    assert_eq!(cancelled.status(), "cancelled");
+
+    let empty = JobSummary::from_counts(&[]).unwrap_or_default();
+    assert_eq!(empty.status(), "success");
+  }
+
+  #[test]
+  fn payload_is_tagged() {
+    let event = EvaluationEvent {
+      evaluation_id: Uuid::nil(),
+      project_name:  "p".into(),
+      project_url:   "https://github.com/o/r".into(),
+      jobset_name:   "main".into(),
+      commit_hash:   "abc".into(),
+      branch:        Some("main".into()),
+      pr_number:     None,
+      source_scope:  None,
+      superseded_by: None,
+      jobs:          JobSummary {
+        total: 1,
+        succeeded: 1,
+        ..JobSummary::default()
+      },
+    };
+    let payload = event.webhook_payload();
+    assert_eq!(payload["event"], "evaluation_finished");
+    assert_eq!(payload["status"], "success");
+    assert_eq!(payload["jobs"]["total"], 1);
+    assert!(payload["pr_number"].is_null());
+  }
+}

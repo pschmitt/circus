@@ -683,6 +683,16 @@ async fn run_nix_and_record_builds(
       {
         tracing::warn!(eval_id = %eval.id, "Failed to auto-promote channels: {error}");
       }
+
+      // An evaluation whose jobs were all cached is done right here; no job
+      // finishing later will report it.
+      circus_notification::dispatch_evaluation_finished_if_done(
+        pool,
+        eval.id,
+        notifications_config,
+        notification_secret_key,
+      )
+      .await;
     },
     Err(e) => {
       let msg = e.to_string();

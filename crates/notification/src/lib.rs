@@ -18,11 +18,11 @@ use std::{
 pub use channel::{NotificationChannel, Origin};
 use circus_common::{
   PgPool,
-  models::{Build, BuildStatus, NotificationType, Project},
+  models::{Build, BuildStatus, EvaluationStatus, NotificationType, Project},
   repo,
 };
 use circus_config::NotificationsConfig;
-pub use event::BuildEvent;
+pub use event::{BuildEvent, EvaluationEvent, JobSummary};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
@@ -127,13 +127,10 @@ pub(crate) async fn apply_github_rate_limit(
 /// project has not configured.
 async fn resolve_channels(
   pool: Option<&PgPool>,
-  build: &Build,
   project: &Project,
-  commit_hash: &str,
   config: &NotificationsConfig,
   encryption_key: Option<&str>,
 ) -> Vec<(NotificationChannel, Origin)> {
-  let event = BuildEvent::from_build(build, project, commit_hash);
   let mut channels = Vec::new();
   let mut configured_types: Vec<NotificationType> = Vec::new();
 
@@ -172,7 +169,7 @@ async fn resolve_channels(
   }
 
   // Global fallback for any channel kind the project did not configure.
-  for channel in global_fallback_channels(config, &event) {
+  for channel in global_fallback_channels(config, &project.repository_url) {
     if !configured_types.contains(&channel.notification_type()) {
       channels.push((channel, Origin::Instance));
     }
@@ -185,7 +182,7 @@ async fn resolve_channels(
 /// when a project has not configured the corresponding channel kind.
 fn global_fallback_channels(
   config: &NotificationsConfig,
-  event: &BuildEvent,
+  project_url: &str,
 ) -> Vec<NotificationChannel> {
   use channel::{
     GiteaStatusChannel,
@@ -199,10 +196,13 @@ fn global_fallback_channels(
   if let Some(url) = &config.webhook_url {
     out.push(NotificationChannel::Webhook(WebhookChannel {
       url: url.clone(),
+      secret_file: config.webhook_secret_file.clone(),
+      build_events: config.webhook_build_events,
+      evaluation_events: config.webhook_evaluation_events,
       ..Default::default()
     }));
   }
-  if event.project_url.contains("github.com")
+  if project_url.contains("github.com")
     && let Some(token) = config.current_github_token()
   {
     out.push(NotificationChannel::GithubStatus(GithubStatusChannel {
@@ -258,9 +258,7 @@ async fn dispatch(
     return;
   }
 
-  let channels =
-    resolve_channels(pool, build, project, commit_hash, config, encryption_key)
-      .await;
+  let channels = resolve_channels(pool, project, config, encryption_key).await;
 
   // The retry queue persists secrets in the task payload, so it requires an
   // encryption key. Without one, fall back to immediate delivery rather than
@@ -415,6 +413,97 @@ pub async fn dispatch_build_finished(
     false,
   )
   .await;
+  // The last top-level job of an evaluation finishing completes it.
+  if let Some(pool) = pool
+    && !BuildEvent::from_build(build, project, commit_hash).is_dependency()
+  {
+    dispatch_evaluation_finished_if_done(
+      pool,
+      build.evaluation_id,
+      config,
+      encryption_key,
+    )
+    .await;
+  }
+}
+
+/// Deliver an evaluation-finished event to every webhook that opted into
+/// evaluation events, if the evaluation has completed and none of its
+/// top-level jobs is pending or running any more. Called whenever a top-level
+/// job finishes and when an evaluation completes, so whichever comes last
+/// sends the event. Two jobs finishing at the same moment can both send it:
+/// consumers deduplicate by evaluation id.
+pub async fn dispatch_evaluation_finished_if_done(
+  pool: &PgPool,
+  evaluation_id: uuid::Uuid,
+  config: &NotificationsConfig,
+  encryption_key: Option<&str>,
+) {
+  let (event, project) = match evaluation_event(pool, evaluation_id).await {
+    Ok(Some(found)) => found,
+    Ok(None) => return,
+    Err(e) => {
+      warn!(%evaluation_id, "Cannot build evaluation notification: {e}");
+      return;
+    },
+  };
+  for (channel, origin) in
+    resolve_channels(Some(pool), &project, config, encryption_key).await
+  {
+    let NotificationChannel::Webhook(webhook) = &channel else {
+      continue;
+    };
+    if !webhook.evaluation_events {
+      continue;
+    }
+    // A short inline retry: unlike build events these do not go through the
+    // persistent queue, so a consumer must be able to catch up by itself.
+    let mut delay = Duration::from_secs(1);
+    for attempt in 1..=3 {
+      match webhook.deliver_evaluation(&event, origin).await {
+        Ok(()) => break,
+        Err(e) if attempt < 3 => {
+          warn!(%evaluation_id, attempt, "Evaluation webhook failed, retrying: {e}");
+          tokio::time::sleep(delay).await;
+          delay *= 3;
+        },
+        Err(e) => {
+          error!(%evaluation_id, "Evaluation webhook failed: {e}");
+        },
+      }
+    }
+  }
+}
+
+/// The event (and its project) for a completed evaluation whose top-level
+/// jobs all finished, `None` while it is still evaluating or building.
+async fn evaluation_event(
+  pool: &PgPool,
+  evaluation_id: uuid::Uuid,
+) -> circus_common::error::Result<Option<(EvaluationEvent, Project)>> {
+  let evaluation = repo::evaluations::get(pool, evaluation_id).await?;
+  if evaluation.status != EvaluationStatus::Completed {
+    return Ok(None);
+  }
+  let counts = repo::builds::job_status_counts(pool, evaluation_id).await?;
+  let Some(jobs) = JobSummary::from_counts(&counts) else {
+    return Ok(None);
+  };
+  let jobset = repo::jobsets::get(pool, evaluation.jobset_id).await?;
+  let project = repo::projects::get(pool, jobset.project_id).await?;
+  let event = EvaluationEvent {
+    evaluation_id,
+    project_name: project.name.clone(),
+    project_url: project.repository_url.clone(),
+    jobset_name: jobset.name,
+    commit_hash: evaluation.commit_hash,
+    branch: evaluation.pr_head_branch.or(jobset.branch),
+    pr_number: evaluation.pr_number,
+    source_scope: evaluation.source_scope,
+    superseded_by: evaluation.superseded_by,
+    jobs,
+  };
+  Ok(Some((event, project)))
 }
 
 /// Dispatch commit-status notifications when a build is created (pending).

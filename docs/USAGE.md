@@ -777,6 +777,35 @@ GET /api/v1/admin/notification-tasks
 POST /api/v1/admin/notification-tasks/{id}/retry
 ```
 
+#### Generic webhook events
+
+A generic webhook receives one JSON `POST` per finished top-level build
+(`"event": "build_finished"`). It can also receive one per evaluation
+(`"event": "evaluation_finished"`) once the evaluation is complete and none of
+its top-level jobs is pending or running any more. That event carries
+`evaluation_id`, `status` (`success`, `failure`, `cancelled` or `partial`),
+a `jobs` summary (`total`, `succeeded`, `failed`, `cancelled`, `skipped`),
+`project_name`, `project_url`, `jobset_name`, `commit_hash`, `branch`,
+`pr_number`, `source_scope` and `superseded_by`. It can be delivered more than
+once; deduplicate by `evaluation_id`. Evaluation events skip the retry queue
+and are retried three times right away, so a consumer that must not miss one
+should also poll the API.
+
+For a project webhook, set `"evaluation_events": true` (and optionally
+`"build_events": false`) in its config. For the instance webhook:
+
+```toml
+[notifications]
+webhook_url               = "https://ci-hooks.example.com/circus"
+# HMAC-SHA256 key for X-Circus-Signature, read on every delivery.
+webhook_secret_file       = "/run/secrets/circus-webhook-key"
+webhook_build_events      = false
+webhook_evaluation_events = true
+```
+
+`secret_file` is only accepted for the instance webhook: a project could
+otherwise make the server sign with the contents of any file it can read.
+
 ### Webhooks
 
 Webhooks let forges trigger evaluations without waiting for polling. Supported
