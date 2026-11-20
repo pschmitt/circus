@@ -349,7 +349,10 @@
         settings = map (child: child.settings) children;
         credentials = concatMap (child: child.credentials) children;
       }
-      else if lib.hasSuffix "_file" (lib.last path) && (lib.isString value || lib.isPath value)
+      else if
+        lib.hasSuffix "_file" (lib.last path)
+        && (lib.isString value || lib.isPath value)
+        && !(builtins.elem (toString value) cfg.runtimeFiles)
       then let
         credential = lib.concatStringsSep "." path;
       in {
@@ -440,6 +443,21 @@ in {
           }
         ];
       };
+    };
+
+    runtimeFiles = mkOption {
+      type = listOf str;
+      default = [];
+      example = ["/run/circus-github-token/token"];
+      description = ''
+        Absolute paths of `*_file` settings that are read in place instead of
+        being copied into a systemd credential when the service starts. Use it
+        for files that change while Circus runs, such as GitHub App
+        installation tokens minted by a timer: Circus re-reads token files on
+        every use, but a credential would keep the copy from service start.
+        The services must be able to read these paths themselves (owner,
+        group or `SupplementaryGroups`).
+      '';
     };
 
     database.createLocally = mkOption {
