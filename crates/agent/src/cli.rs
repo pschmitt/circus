@@ -36,7 +36,9 @@ struct Cli {
   ephemeral: bool,
 
   /// Agent name. Overrides `[agent].name`; required for config-free launches.
-  #[pound(long)]
+  /// The environment form lets one image or unit file serve a pool of agents
+  /// that must each join under their own name.
+  #[pound(long, env = "CIRCUS_AGENT_NAME")]
   name: Option<String>,
 
   /// Runner RPC endpoint. Overrides `[agent].runner_url`.
