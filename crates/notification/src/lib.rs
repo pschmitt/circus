@@ -426,6 +426,11 @@ pub async fn dispatch_build_created(
   config: &NotificationsConfig,
   encryption_key: Option<&str>,
 ) {
+  // Dependency builds never get a commit status (see `dispatch`); return
+  // before logging one.
+  if BuildEvent::from_build(build, project, commit_hash).is_dependency() {
+    return;
+  }
   dispatch(
     Some(pool),
     build,
@@ -453,6 +458,11 @@ pub async fn dispatch_build_started(
   config: &NotificationsConfig,
   encryption_key: Option<&str>,
 ) {
+  // Dependency builds never get a commit status (see `dispatch`); return
+  // before logging one.
+  if BuildEvent::from_build(build, project, commit_hash).is_dependency() {
+    return;
+  }
   dispatch(
     Some(pool),
     build,
