@@ -1,0 +1,72 @@
+# pschmitt fork: publish a statically linked aarch64 circus-agent for the
+# ephemeral GitHub Actions agents of pschmitt/nixos-config (its
+# circus-builder.yml downloads it by URL and checks the sha256). Built on a
+# native arm runner, because the flake's circus-agent-static cross target
+# follows the build host's system.
+name: Release aarch64 agent
+
+on:
+  push:
+    tags:
+      - "v*-pschmitt.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build and attach the agent to
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-agent-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static aarch64 circus-agent
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build
+        run: nix build .#circus-agent-static -L
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          install -m 0755 result/bin/circus-agent circus-agent-aarch64-linux
+          file circus-agent-aarch64-linux
+          if file circus-agent-aarch64-linux | grep -q 'dynamically linked'
+          then
+            echo "::error::circus-agent is not statically linked"
+            exit 1
+          fi
+          sha256sum circus-agent-aarch64-linux > circus-agent-aarch64-linux.sha256
+          cat circus-agent-aarch64-linux.sha256
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+          then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --verify-tag --title "$TAG" \
+              --notes "Static aarch64 circus-agent built from the pschmitt fork at ${TAG}."
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            circus-agent-aarch64-linux circus-agent-aarch64-linux.sha256
