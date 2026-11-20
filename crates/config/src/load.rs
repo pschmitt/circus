@@ -29,6 +29,9 @@ impl Config {
 
   /// Resolve `*_file` secret fields by reading their file contents at startup.
   ///
+  /// The forge token files of `[notifications]` are only checked here: they
+  /// are read on every use, so a rotated token takes effect without a restart.
+  ///
   /// For `Option<String>` fields the inline value takes precedence; the file
   /// is read only when the inline value is `None`. For required fields
   /// (`database.url`) the file overrides unconditionally since the field
@@ -76,18 +79,34 @@ impl Config {
       self.notifications.webhook_url,
       self.notifications.webhook_url_file
     );
-    resolve_optional!(
-      self.notifications.github_token,
-      self.notifications.github_token_file
-    );
-    resolve_optional!(
-      self.notifications.gitea_token,
-      self.notifications.gitea_token_file
-    );
-    resolve_optional!(
-      self.notifications.gitlab_token,
-      self.notifications.gitlab_token_file
-    );
+    // Forge tokens are short-lived when minted for an app installation, so
+    // their files are read on every use (`NotificationsConfig::current_*`).
+    // A file that is missing or empty now (its refresher has not run yet) only
+    // disables that forge's statuses until it appears, so warn, don't fail.
+    for (inline, file) in [
+      (
+        &self.notifications.github_token,
+        &self.notifications.github_token_file,
+      ),
+      (
+        &self.notifications.gitea_token,
+        &self.notifications.gitea_token_file,
+      ),
+      (
+        &self.notifications.gitlab_token,
+        &self.notifications.gitlab_token_file,
+      ),
+    ] {
+      if inline.is_none()
+        && let Some(path) = file
+        && let Err(error) = read_secret(path)
+      {
+        tracing::warn!(
+          path = %path.display(),
+          "Forge token file is not usable yet: {error}"
+        );
+      }
+    }
 
     // email (nested inside notifications)
     if let Some(ref mut email) = self.notifications.email {

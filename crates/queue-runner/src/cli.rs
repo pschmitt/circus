@@ -206,7 +206,8 @@ where
         work_dir = %work_dir.display(),
         enable_retry_queue = nc.enable_retry_queue,
         webhook_url_set = nc.webhook_url.is_some(),
-        github_token_set = nc.github_token.is_some(),
+        github_token_set =
+          nc.github_token.is_some() || nc.github_token_file.is_some(),
         slack_set = nc.slack.is_some(),
         email_set = nc.email.is_some(),
         signing_enabled = signing_enabled,
@@ -821,13 +822,20 @@ async fn notification_retry_loop(
       },
     };
 
-    let secret_key = hot_config.read().await.notification_secret_key.clone();
+    let (secret_key, notifications_config) = {
+      let hot = hot_config.read().await;
+      (
+        hot.notification_secret_key.clone(),
+        hot.notifications_config.clone(),
+      )
+    };
 
     for task in tasks {
       match circus_notification::process_notification_task(
         &pool,
         &task,
         secret_key.as_deref(),
+        Some(&notifications_config),
       )
       .await
       {

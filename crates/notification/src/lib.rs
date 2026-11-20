@@ -202,27 +202,27 @@ fn global_fallback_channels(
       ..Default::default()
     }));
   }
-  if let Some(token) = &config.github_token
-    && event.project_url.contains("github.com")
+  if event.project_url.contains("github.com")
+    && let Some(token) = config.current_github_token()
   {
     out.push(NotificationChannel::GithubStatus(GithubStatusChannel {
-      token: token.clone(),
+      token,
     }));
   }
-  if let (Some(base_url), Some(token)) =
-    (&config.gitea_url, &config.gitea_token)
+  if let Some(base_url) = &config.gitea_url
+    && let Some(token) = config.current_gitea_token()
   {
     out.push(NotificationChannel::GiteaStatus(GiteaStatusChannel {
       base_url: base_url.clone(),
-      token:    token.clone(),
+      token,
     }));
   }
-  if let (Some(base_url), Some(token)) =
-    (&config.gitlab_url, &config.gitlab_token)
+  if let Some(base_url) = &config.gitlab_url
+    && let Some(token) = config.current_gitlab_token()
   {
     out.push(NotificationChannel::GitlabStatus(GitlabStatusChannel {
       base_url: base_url.clone(),
-      token:    token.clone(),
+      token,
     }));
   }
   if let Some(slack) = &config.slack {
@@ -473,6 +473,11 @@ pub async fn dispatch_build_started(
 
 /// Process a notification task from the retry queue.
 ///
+/// A queued instance-level forge status carries the token it was enqueued
+/// with. When `config` is given, that token is replaced by the instance's
+/// current one first, so a retry after a token rotation (short-lived app
+/// installation tokens) does not fail on the expired token.
+///
 /// # Errors
 ///
 /// Returns an error string if notification delivery fails, so the caller can
@@ -481,16 +486,22 @@ pub async fn process_notification_task(
   pool: &PgPool,
   task: &circus_common::models::NotificationTask,
   encryption_key: Option<&str>,
+  config: Option<&NotificationsConfig>,
 ) -> Result<(), String> {
   let payload = TaskPayload::deserialize(&task.payload)
     .map_err(|e| format!("Invalid notification task payload: {e}"))?;
-  let channel = NotificationChannel::from_stored(
+  let mut channel = NotificationChannel::from_stored(
     task.notification_type,
     &payload.channel,
     encryption_key,
     payload.origin,
   )
   .map_err(|e| format!("Invalid stored notification channel: {e}"))?;
+  if payload.origin == Origin::Instance
+    && let Some(config) = config
+  {
+    channel.refresh_instance_token(config);
+  }
   let event = payload.event;
 
   if event.is_dependency() {

@@ -25,7 +25,7 @@ use circus_common::{
     validate_webhook_url,
   },
 };
-use circus_config::EmailConfig;
+use circus_config::{EmailConfig, NotificationsConfig};
 use circus_http::guard::is_internal_host;
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -102,6 +102,30 @@ pub enum NotificationChannel {
   GitlabStatus(GitlabStatusChannel),
   Slack(SlackChannel),
   Email(EmailConfig),
+}
+
+impl NotificationChannel {
+  /// Replace a forge status channel's token by the instance's current one.
+  /// Only meaningful for channels built from the global `[notifications]`
+  /// config ([`Origin::Instance`]); other kinds are left unchanged, and so is
+  /// the token when no current one can be read.
+  pub fn refresh_instance_token(&mut self, config: &NotificationsConfig) {
+    let current = match self {
+      Self::GithubStatus(_) => config.current_github_token(),
+      Self::GiteaStatus(_) => config.current_gitea_token(),
+      Self::GitlabStatus(_) => config.current_gitlab_token(),
+      Self::Webhook(_) | Self::Slack(_) | Self::Email(_) => None,
+    };
+    let Some(current) = current else {
+      return;
+    };
+    match self {
+      Self::GithubStatus(c) => c.token = current,
+      Self::GiteaStatus(c) => c.token = current,
+      Self::GitlabStatus(c) => c.token = current,
+      Self::Webhook(_) | Self::Slack(_) | Self::Email(_) => {},
+    }
+  }
 }
 
 impl Debug for GithubStatusChannel {
@@ -731,5 +755,48 @@ mod tests {
       on_failure_only: false,
     });
     assert!(always.applies_to(&event));
+  }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+  use circus_config::NotificationsConfig;
+
+  use super::{GithubStatusChannel, NotificationChannel, WebhookChannel};
+
+  #[test]
+  fn refresh_replaces_forge_token_with_current_one() {
+    let path = std::env::temp_dir()
+      .join(format!("circus-refresh-{}", std::process::id()));
+    std::fs::write(&path, "rotated\n").expect("write token file");
+    let config = NotificationsConfig {
+      github_token_file: Some(path.clone()),
+      ..Default::default()
+    };
+    let mut channel = NotificationChannel::GithubStatus(GithubStatusChannel {
+      token: "expired".into(),
+    });
+    channel.refresh_instance_token(&config);
+    assert!(matches!(
+      &channel,
+      NotificationChannel::GithubStatus(c) if c.token == "rotated"
+    ));
+    std::fs::remove_file(path).expect("remove token file");
+  }
+
+  #[test]
+  fn refresh_keeps_token_without_current_one() {
+    let mut channel = NotificationChannel::GithubStatus(GithubStatusChannel {
+      token: "kept".into(),
+    });
+    channel.refresh_instance_token(&NotificationsConfig::default());
+    assert!(matches!(
+      &channel,
+      NotificationChannel::GithubStatus(c) if c.token == "kept"
+    ));
+
+    let mut webhook = NotificationChannel::Webhook(WebhookChannel::default());
+    webhook.refresh_instance_token(&NotificationsConfig::default());
+    assert!(matches!(webhook, NotificationChannel::Webhook(_)));
   }
 }

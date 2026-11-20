@@ -402,6 +402,63 @@ pub struct NotificationsConfig {
   pub retry_poll_interval: u64,
 }
 
+impl NotificationsConfig {
+  /// The GitHub token to use now: the inline `github_token`, else the current
+  /// content of `github_token_file`.
+  ///
+  /// The file is read on every call so that a token rotated on disk (for
+  /// example a GitHub App installation token refreshed by a timer) takes
+  /// effect without restarting. Returns `None` when neither is configured or
+  /// the file cannot be read or is empty.
+  #[must_use]
+  pub fn current_github_token(&self) -> Option<String> {
+    current_token(
+      self.github_token.as_deref(),
+      self.github_token_file.as_ref(),
+    )
+  }
+
+  /// The Gitea token to use now; see [`Self::current_github_token`].
+  #[must_use]
+  pub fn current_gitea_token(&self) -> Option<String> {
+    current_token(self.gitea_token.as_deref(), self.gitea_token_file.as_ref())
+  }
+
+  /// The GitLab token to use now; see [`Self::current_github_token`].
+  #[must_use]
+  pub fn current_gitlab_token(&self) -> Option<String> {
+    current_token(
+      self.gitlab_token.as_deref(),
+      self.gitlab_token_file.as_ref(),
+    )
+  }
+}
+
+fn current_token(
+  inline: Option<&str>,
+  file: Option<&PathBuf>,
+) -> Option<String> {
+  if let Some(token) = inline {
+    return Some(token.to_owned());
+  }
+  let path = file?;
+  match std::fs::read_to_string(path) {
+    Ok(content) => {
+      let token = content.trim();
+      if token.is_empty() {
+        tracing::warn!(path = %path.display(), "Token file is empty");
+        None
+      } else {
+        Some(token.to_owned())
+      }
+    },
+    Err(error) => {
+      tracing::warn!(path = %path.display(), %error, "Failed to read token file");
+      None
+    },
+  }
+}
+
 impl Default for NotificationsConfig {
   fn default() -> Self {
     Self {
@@ -1021,5 +1078,57 @@ mod signing_tests {
     // Wrong length (32 bytes, not 64).
     let short = format!("name:{}", BASE64.encode(&[0u8; 32]));
     assert!(public_key_from_secret(&short).is_none());
+  }
+}
+
+#[cfg(test)]
+mod token_file_tests {
+  use std::{fs, path::PathBuf};
+
+  use super::NotificationsConfig;
+
+  fn temp_file(name: &str, content: &str) -> PathBuf {
+    let path = std::env::temp_dir()
+      .join(format!("circus-token-{}-{name}", std::process::id()));
+    fs::write(&path, content).expect("write token file");
+    path
+  }
+
+  #[test]
+  fn inline_token_takes_precedence() {
+    let path = temp_file("inline", "from-file");
+    let config = NotificationsConfig {
+      github_token: Some("inline".into()),
+      github_token_file: Some(path.clone()),
+      ..Default::default()
+    };
+    assert_eq!(config.current_github_token().as_deref(), Some("inline"));
+    fs::remove_file(path).expect("remove token file");
+  }
+
+  #[test]
+  fn token_file_is_reread_after_rotation() {
+    let path = temp_file("rotate", "first\n");
+    let config = NotificationsConfig {
+      github_token_file: Some(path.clone()),
+      ..Default::default()
+    };
+    assert_eq!(config.current_github_token().as_deref(), Some("first"));
+    fs::write(&path, "second\n").expect("rotate token");
+    assert_eq!(config.current_github_token().as_deref(), Some("second"));
+    fs::remove_file(path).expect("remove token file");
+  }
+
+  #[test]
+  fn missing_or_empty_token_file_yields_none() {
+    let path = temp_file("empty", "  \n");
+    let config = NotificationsConfig {
+      gitea_token_file: Some(path.clone()),
+      gitlab_token_file: Some(PathBuf::from("/nonexistent/circus-token")),
+      ..Default::default()
+    };
+    assert_eq!(config.current_gitea_token(), None);
+    assert_eq!(config.current_gitlab_token(), None);
+    fs::remove_file(path).expect("remove token file");
   }
 }
