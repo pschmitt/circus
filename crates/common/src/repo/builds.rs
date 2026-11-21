@@ -324,11 +324,13 @@ pub async fn list_for_jobset_evaluations(
 /// [`list_pending`].
 #[derive(Debug, Serialize)]
 pub struct BuildVenue<'a> {
-  pub systems:            &'a [String],
-  pub supported_features: &'a [String],
-  pub mandatory_features: &'a [String],
+  pub systems:              &'a [String],
+  pub supported_features:   &'a [String],
+  pub mandatory_features:   &'a [String],
   /// Builds without a system run only on the runner host.
-  pub runs_systemless:    bool,
+  pub runs_systemless:      bool,
+  /// Whether this venue requires a branch evaluation before dispatch.
+  pub requires_trusted_ref: bool,
 }
 
 /// List pending builds some venue can take, plus any older than

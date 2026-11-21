@@ -199,10 +199,11 @@ async fn list_pending_x86(
 ) -> Vec<Build> {
   let systems = ["x86_64-linux".to_owned()];
   let venue = repo::builds::BuildVenue {
-    systems:            &systems,
-    supported_features: &[],
-    mandatory_features: &[],
-    runs_systemless:    true,
+    systems:              &systems,
+    supported_features:   &[],
+    mandatory_features:   &[],
+    runs_systemless:      true,
+    requires_trusted_ref: false,
   };
   repo::builds::list_pending(pool, &[venue], None, limit, schedulable_capacity)
     .await
@@ -1730,6 +1731,74 @@ async fn test_list_pending_skips_builds_no_venue_can_serve() {
     pending.iter().map(|build| build.id).collect::<Vec<_>>(),
     vec![native.id]
   );
+
+  let _ = repo::projects::delete(&pool, project.id).await;
+}
+
+#[tokio::test]
+async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+  let project = create_test_project(&pool, "trusted-venue").await;
+  let jobset = create_test_jobset(&pool, project.id).await;
+  repo::jobsets::update(&pool, jobset.id, UpdateJobset {
+    branch: Some("main".to_owned()),
+    ..Default::default()
+  })
+  .await
+  .expect("set branch");
+  let pr = repo::evaluations::create(&pool, CreateEvaluation {
+    jobset_id:      jobset.id,
+    commit_hash:    uuid::Uuid::new_v4().simple().to_string(),
+    pr_number:      Some(1),
+    pr_head_branch: Some("feature".to_owned()),
+    pr_base_branch: Some("main".to_owned()),
+    pr_action:      None,
+  })
+  .await
+  .expect("create PR evaluation");
+  let main = create_test_eval(&pool, jobset.id).await;
+  let system = "aarch64-linux";
+  let pr_build =
+    create_test_build(&pool, pr.id, "pr", "/nix/store/pr.drv", Some(system))
+      .await;
+  let main_build = create_test_build(
+    &pool,
+    main.id,
+    "main",
+    "/nix/store/main.drv",
+    Some(system),
+  )
+  .await;
+  repo::builds::bump_priority(&pool, pr_build.id, 10)
+    .await
+    .expect("put PR build at the head of the queue");
+
+  let systems = [system.to_owned()];
+  let venue = repo::builds::BuildVenue {
+    systems:              &systems,
+    supported_features:   &[],
+    mandatory_features:   &[],
+    runs_systemless:      false,
+    requires_trusted_ref: true,
+  };
+  let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
+    .await
+    .expect("list pending for trusted venue");
+  assert_eq!(pending.first().map(|build| build.id), Some(main_build.id));
+
+  let venue = repo::builds::BuildVenue {
+    systems:              &systems,
+    supported_features:   &[],
+    mandatory_features:   &[],
+    runs_systemless:      false,
+    requires_trusted_ref: false,
+  };
+  let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
+    .await
+    .expect("list pending for unrestricted venue");
+  assert_eq!(pending.first().map(|build| build.id), Some(pr_build.id));
 
   let _ = repo::projects::delete(&pool, project.id).await;
 }

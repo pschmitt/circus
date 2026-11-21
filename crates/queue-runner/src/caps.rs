@@ -94,10 +94,11 @@ impl RunnerCaps {
   pub fn venue(&self) -> Option<BuildVenue<'_>> {
     self.enabled.then(|| {
       BuildVenue {
-        systems:            &self.systems,
-        supported_features: &self.features,
-        mandatory_features: &[],
-        runs_systemless:    true,
+        systems:              &self.systems,
+        supported_features:   &self.features,
+        mandatory_features:   &[],
+        runs_systemless:      true,
+        requires_trusted_ref: false,
       }
     })
   }

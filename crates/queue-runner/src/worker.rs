@@ -184,6 +184,16 @@ impl WorkerPool {
     &self.runner_caps
   }
 
+  pub(crate) fn agent_requires_trusted_ref(
+    &self,
+    agent: &crate::rpc::pool::AgentSnapshot,
+  ) -> bool {
+    agent.requires_trusted_ref()
+      || self.qemu_overflow.as_ref().is_some_and(|(overflow, _)| {
+        dispatch::is_qemu_overflow_agent(&agent.name, overflow)
+      })
+  }
+
   #[must_use]
   pub const fn active_builds(&self) -> &ActiveBuilds {
     &self.active_builds

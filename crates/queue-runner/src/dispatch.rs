@@ -539,7 +539,7 @@ fn agent_name_matches_pool(agent_name: &str, pool_name: &str) -> bool {
       .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
-fn is_qemu_overflow_agent(
+pub(crate) fn is_qemu_overflow_agent(
   agent_name: &str,
   overflow: &circus_config::QemuOverflowConfig,
 ) -> bool {

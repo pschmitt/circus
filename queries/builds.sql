@@ -63,7 +63,8 @@ WITH venues AS MATERIALIZED (
     systems text[],
     supported_features text[],
     mandatory_features text[],
-    runs_systemless bool
+    runs_systemless bool,
+    requires_trusted_ref bool
   )
 ),
 eligible_pending AS (
@@ -83,6 +84,20 @@ eligible_pending AS (
           )
           AND COALESCE(b.effective_features, b.required_features) <@ v.supported_features
           AND v.mandatory_features <@ COALESCE(b.effective_features, b.required_features)
+          AND (
+            NOT v.requires_trusted_ref
+            OR EXISTS (
+              SELECT 1
+              FROM evaluations candidate
+              JOIN jobsets jobset ON jobset.id = candidate.jobset_id
+              WHERE candidate.id = b.evaluation_id
+                AND jobset.branch <> ''
+                AND candidate.pr_number IS NULL
+                AND candidate.pr_head_branch IS NULL
+                AND candidate.pr_base_branch IS NULL
+                AND candidate.trigger_kind IN ('source_change', 'manual', 'interval')
+            )
+          )
       )
     )
     AND NOT EXISTS (
