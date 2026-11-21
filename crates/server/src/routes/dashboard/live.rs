@@ -43,6 +43,11 @@ pub(super) struct BuildsChanged {
   ticks:    u32,
 }
 
+#[derive(Clone)]
+pub(super) struct BuildPresentation {
+  pub(super) simple: bool,
+}
+
 /// Why a live build view woke up.
 pub(super) enum Wake {
   /// A build changed, so reload as the viewer resolved again.
@@ -105,6 +110,7 @@ pub fn service(state: AppState, assets: AssetBundle) -> TowerService {
   let receiver = build_updates(&state);
   let router = Router::builder()
     .app_context(state)
+    .app_context(BuildPresentation { simple: false })
     .app_context(BuildsChanged { receiver, ticks: 0 })
     .discover()
     .assets(assets)
@@ -128,6 +134,7 @@ pub fn build_service(state: AppState, assets: AssetBundle) -> TowerService {
   let receiver = build_updates(&state);
   let router = Router::builder()
     .app_context(state)
+    .app_context(BuildPresentation { simple: true })
     .app_context(BuildsChanged { receiver, ticks: 0 })
     .page(PageFn::new(Method::GET, "/", root_page))
     .page(super::views::simple::simple_page)

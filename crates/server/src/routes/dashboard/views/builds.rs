@@ -19,7 +19,7 @@ use super::super::{
   build_log::{BuildLogView, parse_build_log},
   components::eta_text,
   layout::{document, shard_viewer, viewer},
-  live::{BuildsChanged, Wake},
+  live::{BuildPresentation, BuildsChanged, Wake},
   pages::{
     dashboard_system_filters,
     derivation_name,
@@ -1319,30 +1319,49 @@ pub(in crate::routes::dashboard) async fn build_log_page(
   let raw = read_log_file(&path).await.ok().ok_or_not_found()?;
   let log = parse_build_log(&raw);
   let build = build_view(&build);
+  let simple = app_context::<BuildPresentation>(cx).simple;
   let title = format!("Log {}", build.job_name);
 
   Ok(view! {
-    document(title: &title, viewer: &viewer,
-      <nav class="breadcrumbs">
-        <a href="/projects">"Projects"</a>
-        <span class="sep">"/"</span>
-        <a href=(format!("/project/{}", lineage.project_id))>(lineage.project_name.clone())</a>
-        <span class="sep">"/"</span>
-        <a href=(format!("/jobset/{}", lineage.jobset_id))>(lineage.jobset_name.clone())</a>
-        <span class="sep">"/"</span>
-        <a href=(format!("/evaluation/{}", lineage.eval_id))>(lineage.commit_short.clone())</a>
-        <span class="sep">"/"</span>
-        <a href=(format!("/build/{}", build.id))>(build.job_name.clone())</a>
-        <span class="sep">"/"</span>
-        <span class="current">"Log"</span>
-      </nav>
-      log_page(details: &build, log: log)
+    document(title: &title, viewer: &viewer, topbar: !simple,
+      if simple {
+        <section class="simple-dashboard simple-log-page">
+          <header class="simple-header">
+            <a class="simple-wordmark" href="/">"build.brkn.lol"</a>
+            <a href="/" aria-label="Return to builds">"← All builds"</a>
+          </header>
+          <main class="simple-content">
+            log_page(details: &build, log: log, simple: true)
+          </main>
+        </section>
+      } else {
+        <div class="circus-log-page">
+          <nav class="breadcrumbs">
+            <a href="/projects">"Projects"</a>
+            <span class="sep">"/"</span>
+            <a href=(format!("/project/{}", lineage.project_id))>(lineage.project_name.clone())</a>
+            <span class="sep">"/"</span>
+            <a href=(format!("/jobset/{}", lineage.jobset_id))>(lineage.jobset_name.clone())</a>
+            <span class="sep">"/"</span>
+            <a href=(format!("/evaluation/{}", lineage.eval_id))>(lineage.commit_short.clone())</a>
+            <span class="sep">"/"</span>
+            <a href=(format!("/build/{}", build.id))>(build.job_name.clone())</a>
+            <span class="sep">"/"</span>
+            <span class="current">"Log"</span>
+          </nav>
+          log_page(details: &build, log: log, simple: false)
+        </div>
+      }
     )
   })
 }
 
 #[component]
-async fn log_page(details: &BuildView, log: BuildLogView) -> Result<impl View> {
+async fn log_page(
+  details: &BuildView,
+  log: BuildLogView,
+  simple: bool,
+) -> Result<impl View> {
   let failed = details.status_class == "failed";
 
   Ok(view! {
@@ -1356,7 +1375,9 @@ async fn log_page(details: &BuildView, log: BuildLogView) -> Result<impl View> {
           if !details.duration.is_empty() {
             <span>(details.duration.clone())</span>
           }
-          <a href=(format!("/build/{}", details.id))>"Build #" (details.id_short.clone())</a>
+          if !simple {
+            <a href=(format!("/build/{}", details.id))>"Build #" (details.id_short.clone())</a>
+          }
         </div>
       </div>
       <div class="build-log-facts" aria-label="Build log summary">
