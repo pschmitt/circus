@@ -100,8 +100,9 @@ pub async fn upsert_github_pr_comment(
 
   let evaluation = transaction
     .query_one(
-      "SELECT commit_hash, superseded_by, status FROM evaluations WHERE id = \
-       $1",
+      "SELECT e.commit_hash, e.superseded_by, e.status, e.error_message, \
+       j.nix_expression FROM evaluations e JOIN jobsets j ON j.id = \
+       e.jobset_id WHERE e.id = $1",
       &[&event.evaluation_id],
     )
     .await
@@ -111,6 +112,8 @@ pub async fn upsert_github_pr_comment(
   let current_commit: String = evaluation.get("commit_hash");
   let superseded_by: Option<uuid::Uuid> = evaluation.get("superseded_by");
   let status: String = evaluation.get("status");
+  let error: Option<String> = evaluation.get("error_message");
+  let expression: String = evaluation.get("nix_expression");
   if current_commit != event.commit_hash
     || superseded_by.is_some()
     || status != event.evaluation_status.as_db_str()
@@ -150,6 +153,9 @@ pub async fn upsert_github_pr_comment(
       &repo,
       number,
       &latest_event,
+      error
+        .as_deref()
+        .and_then(|error| evaluation_error_summary(error, &expression)),
     ),
   )
   .await
@@ -172,6 +178,7 @@ async fn upsert_github_pr_comment_locked(
   repo: &str,
   number: i32,
   event: &EvaluationEvent,
+  error_summary: Option<String>,
 ) -> Result<(), String> {
   let base_url = Url::parse(circus_base_url)
     .map_err(|error| format!("Invalid Circus base URL: {error}"))?;
@@ -256,7 +263,7 @@ async fn upsert_github_pr_comment_locked(
     );
     return Ok(());
   }
-  let body = render_pr_comment(event, &detail_url);
+  let body = render_pr_comment(event, &detail_url, error_summary.as_deref());
   let target = owned_ids.first().copied();
   let request = target.map_or_else(
     || http.post(format!("{api}/issues/{number}/comments")),
@@ -317,7 +324,34 @@ fn owned_pr_comment_ids(comments: &[IssueComment]) -> Vec<u64> {
     .collect()
 }
 
-fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
+fn evaluation_error_summary(error: &str, expression: &str) -> Option<String> {
+  // Evaluator stderr may contain repository-controlled text or private data.
+  // Publish only known diagnostics and the configured output name.
+  if error.contains("missing attribute")
+    && error.contains(&format!("fragment attr \"{expression}\""))
+    && !expression.is_empty()
+    && expression.len() <= 80
+    && expression
+      .bytes()
+      .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+  {
+    Some(format!(
+      "The PR head is missing the configured flake output `{expression}`."
+    ))
+  } else if error.contains("syntax error") {
+    Some("Nix reported a syntax error while evaluating the PR head.".into())
+  } else if error.contains("failed while reading handshake for <startup>") {
+    Some("The Nix evaluator exited during startup.".into())
+  } else {
+    None
+  }
+}
+
+fn render_pr_comment(
+  event: &EvaluationEvent,
+  detail_url: &str,
+  error_summary: Option<&str>,
+) -> String {
   let (icon, label) = match event.evaluation_status {
     EvaluationStatus::Pending => ("⏳", "Evaluation queued"),
     EvaluationStatus::Running => ("⏳", "Evaluation is running"),
@@ -344,8 +378,8 @@ fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
       format!("{completed}/{} jobs complete", event.jobs.total)
     };
     format!(
-      "**{headline}** · {} succeeded · {} failed · {} running · {} queued · {} \
-       cancelled · {} skipped\n\n",
+      "**{headline}** · {} succeeded · {} failed · {} running · {} queued · \
+       {} cancelled · {} skipped\n\n",
       event.jobs.succeeded,
       event.jobs.failed,
       event.jobs.running,
@@ -354,10 +388,16 @@ fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
       event.jobs.skipped,
     )
   };
+  let diagnostic = if event.evaluation_status == EvaluationStatus::Failed {
+    error_summary.map_or_else(String::new, |summary| format!("{summary}\n\n"))
+  } else {
+    String::new()
+  };
   let commit = &event.commit_hash[..event.commit_hash.len().min(12)];
   format!(
-    "{PR_COMMENT_MARKER}\n### {icon} Circus: {label}\n\n{progress}Commit `{commit}` · \
-     [View evaluation details]({detail_url})",
+    "{PR_COMMENT_MARKER}\n### {icon} Circus: \
+     {label}\n\n{diagnostic}{progress}Commit `{commit}` · [View evaluation \
+     details]({detail_url})",
   )
 }
 
@@ -810,7 +850,7 @@ mod pr_comment_tests {
       (circus_common::models::BuildStatus::Pending, 1),
     ]));
     let body =
-      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+      render_pr_comment(&event, "https://circus.example/evaluation/abc", None);
     assert!(body.contains("Builds are still running"));
     assert!(body.contains("2/4 jobs complete"));
     assert!(body.contains("1 running"));
@@ -823,32 +863,53 @@ mod pr_comment_tests {
     let mut event = event(JobSummary::default());
     event.evaluation_status = EvaluationStatus::Running;
     assert!(
-      render_pr_comment(&event, "https://circus.example/evaluation/abc")
+      render_pr_comment(&event, "https://circus.example/evaluation/abc", None)
         .contains("Evaluation is running")
     );
 
     event.evaluation_status = EvaluationStatus::Failed;
     let body =
-      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+      render_pr_comment(&event, "https://circus.example/evaluation/abc", None);
     assert!(body.contains("Evaluation failed"));
     assert!(!body.contains("0/0 jobs"));
 
     event.evaluation_status = EvaluationStatus::TimedOut;
     assert!(
-      render_pr_comment(&event, "https://circus.example/evaluation/abc")
+      render_pr_comment(&event, "https://circus.example/evaluation/abc", None)
         .contains("Evaluation timed out")
     );
   }
 
   #[test]
   fn running_evaluation_reports_discovered_jobs() {
-    let mut event = event(JobSummary::from_counts_including_pending(&[
-      (circus_common::models::BuildStatus::Succeeded, 5),
-    ]));
+    let mut event = event(JobSummary::from_counts_including_pending(&[(
+      circus_common::models::BuildStatus::Succeeded,
+      5,
+    )]));
     event.evaluation_status = EvaluationStatus::Running;
     let body =
-      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+      render_pr_comment(&event, "https://circus.example/evaluation/abc", None);
     assert!(body.contains("5 jobs discovered"));
     assert!(!body.contains("5/5 jobs complete"));
+  }
+
+  #[test]
+  fn failed_evaluation_shows_only_the_safe_nix_diagnostic() {
+    let mut event = event(JobSummary::default());
+    event.evaluation_status = EvaluationStatus::Failed;
+    let diagnostic = evaluation_error_summary(
+      "worker stderr: private details\nfragment attr \"circusJobs\": missing \
+       attribute",
+      "circusJobs",
+    )
+    .unwrap();
+    let body = render_pr_comment(
+      &event,
+      "https://circus.example/evaluation/abc",
+      Some(&diagnostic),
+    );
+    assert!(body.contains("missing the configured flake output `circusJobs`"));
+    assert!(!body.contains("private details"));
+    assert!(!body.contains("0/0 jobs"));
   }
 }
