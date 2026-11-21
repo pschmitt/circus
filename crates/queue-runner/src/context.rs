@@ -8,6 +8,7 @@ use circus_config::{
   GcConfig,
   LogConfig,
   NotificationsConfig,
+  QemuOverflowConfig,
   SigningConfig,
 };
 use tokio::sync::Semaphore;
@@ -36,4 +37,5 @@ pub struct BuildContext {
   pub agent_pool:              Arc<AgentPool>,
   pub runner_caps:             Arc<RunnerCaps>,
   pub heartbeat_ttl:           Duration,
+  pub qemu_overflow:           Option<(QemuOverflowConfig, Vec<String>)>,
 }

@@ -377,13 +377,64 @@ async fn select_and_reserve_agent(
     return None;
   }
 
-  if candidates
-    .iter()
-    .any(|(_, snap)| snap.requires_trusted_ref())
+  let overflow_report = if let Some((overflow, _)) = ctx.qemu_overflow.as_ref()
   {
+    match circus_common::overflow_demand::read_fresh(
+      &overflow.status_file,
+      overflow.status_ttl_secs,
+    )
+    .await
+    {
+      Ok(report) => report,
+      Err(error) => {
+        tracing::warn!(
+          path = %overflow.status_file.display(),
+          "failed to read QEMU overflow status; failing closed: {error}"
+        );
+        None
+      },
+    }
+  } else {
+    None
+  };
+  candidates.retain(|(_, snap)| {
+    if let Some((overflow, _)) = ctx.qemu_overflow.as_ref()
+      && is_qemu_overflow_agent(&snap.name, overflow)
+    {
+      qemu_overflow_candidate_enabled(
+        overflow,
+        overflow_report,
+        &snap.name,
+        build.system.as_deref(),
+        build.created_at,
+        build.scheduling_features(),
+      )
+    } else {
+      true
+    }
+  });
+  if candidates.is_empty() {
+    return None;
+  }
+
+  if candidates.iter().any(|(_, snap)| {
+    snap.requires_trusted_ref()
+      || ctx.qemu_overflow.as_ref().is_some_and(|(overflow, _)| {
+        is_qemu_overflow_agent(&snap.name, overflow)
+      })
+  }) {
     let trusted = trusted_build_context(&ctx.pool, build).await;
     candidates.retain(|(_, snap)| {
       candidate_allowed_for_trusted_build(snap, trusted.as_ref())
+        && ctx.qemu_overflow.as_ref().is_none_or(|(overflow, repos)| {
+          !is_qemu_overflow_agent(&snap.name, overflow)
+            || trusted
+              .as_ref()
+              .and_then(|context| context.repository.as_deref())
+              .is_some_and(|repository| {
+                repos.iter().any(|allowed| allowed == repository)
+              })
+        })
     });
     if candidates.is_empty() {
       tracing::debug!(
@@ -455,10 +506,22 @@ async fn select_and_reserve_agent(
   // A build back in the queue already failed or vanished on that agent.
   let previous = build.agent_machine_id;
   eligible.sort_by(|a, b| {
+    let a_is_overflow = ctx
+      .qemu_overflow
+      .as_ref()
+      .is_some_and(|(overflow, _)| is_qemu_overflow_agent(&a.1.name, overflow));
+    let b_is_overflow = ctx
+      .qemu_overflow
+      .as_ref()
+      .is_some_and(|(overflow, _)| is_qemu_overflow_agent(&b.1.name, overflow));
     let sa = a.1.contended_surplus(build.scheduling_features(), &demand);
     let sb = b.1.contended_surplus(build.scheduling_features(), &demand);
-    (Some(a.1.machine_id) == previous)
-      .cmp(&(Some(b.1.machine_id) == previous))
+    a_is_overflow
+      .cmp(&b_is_overflow)
+      .then_with(|| {
+        (Some(a.1.machine_id) == previous)
+          .cmp(&(Some(b.1.machine_id) == previous))
+      })
       .then_with(|| sa.cmp(&sb))
       .then_with(|| strategy_order(&ctx.scheduling_strategy, &a.1, &b.1))
       .then_with(|| a.1.machine_id.cmp(&b.1.machine_id))
@@ -467,6 +530,42 @@ async fn select_and_reserve_agent(
   eligible.into_iter().find_map(|(meta, snap)| {
     meta.try_acquire_slot().map(|slot| (meta, snap, slot))
   })
+}
+
+fn agent_name_matches_pool(agent_name: &str, pool_name: &str) -> bool {
+  agent_name == pool_name
+    || agent_name
+      .strip_prefix(pool_name)
+      .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
+fn is_qemu_overflow_agent(
+  agent_name: &str,
+  overflow: &circus_config::QemuOverflowConfig,
+) -> bool {
+  agent_name_matches_pool(agent_name, &overflow.agent_name)
+}
+
+fn qemu_overflow_candidate_enabled(
+  overflow: &circus_config::QemuOverflowConfig,
+  report: Option<circus_common::overflow_demand::OverflowDemandReport>,
+  agent_name: &str,
+  system: Option<&str>,
+  created_at: jiff::Timestamp,
+  required_features: &[String],
+) -> bool {
+  let cutoff = jiff::Timestamp::now()
+    .as_second()
+    .saturating_sub(i64::try_from(overflow.grace_secs).unwrap_or(i64::MAX));
+  is_qemu_overflow_agent(agent_name, overflow)
+    && system == Some(overflow.system.as_str())
+    && created_at.as_second() <= cutoff
+    && supports_required_features(
+      required_features,
+      &overflow.supported_features,
+      &[],
+    )
+    && report.is_some_and(|state| state.overflow_count > 0)
 }
 
 /// Return [`None`] when the agent disappears before reporting a result.
@@ -734,6 +833,7 @@ mod tests {
     candidate_allowed_for_trusted_build,
     github_repository_slug,
     is_trusted_ref_evaluation,
+    qemu_overflow_candidate_enabled,
     supports_required_features,
     wait_for_venue,
   };
@@ -881,6 +981,61 @@ mod tests {
       &strs(&["kvm", "nixos-test", "uid-range"]),
       &strs(&["benchmark", "kvm", "nixos-test"]),
       &[],
+    ));
+  }
+
+  #[test]
+  fn qemu_overflow_requires_grace_fresh_demand_and_supported_features() {
+    let now = Timestamp::now().as_second();
+    let overflow = circus_config::QemuOverflowConfig {
+      agent_name:                 "circus-qemu-overflow".into(),
+      system:                     "aarch64-linux".into(),
+      supported_features:         strs(&["benchmark"]),
+      allowed_build_repositories: strs(&["pschmitt/nixos-config"]),
+      grace_secs:                 120,
+      status_file:                "/run/circus/overflow.json".into(),
+      status_ttl_secs:            60,
+    };
+    let created_at = Timestamp::from_second(now - 180).expect("timestamp");
+    let report = Some(circus_common::overflow_demand::OverflowDemandReport {
+      published_at:             now,
+      overflow_count:           1,
+      native_live_capacity:     0,
+      native_inflight_capacity: 0,
+    });
+    let supported = strs(&["benchmark"]);
+    assert!(qemu_overflow_candidate_enabled(
+      &overflow,
+      report,
+      "circus-qemu-overflow-job-1",
+      Some("aarch64-linux"),
+      created_at,
+      &supported,
+    ));
+
+    assert!(!qemu_overflow_candidate_enabled(
+      &overflow,
+      None,
+      "circus-qemu-overflow-job-1",
+      Some("aarch64-linux"),
+      created_at,
+      &supported,
+    ));
+    assert!(!qemu_overflow_candidate_enabled(
+      &overflow,
+      report,
+      "circus-qemu-overflow-job-1",
+      Some("aarch64-linux"),
+      Timestamp::from_second(now - 30).expect("timestamp"),
+      &supported,
+    ));
+    assert!(!qemu_overflow_candidate_enabled(
+      &overflow,
+      report,
+      "circus-qemu-overflow-job-1",
+      Some("aarch64-linux"),
+      created_at,
+      &strs(&["big-parallel"]),
     ));
   }
 

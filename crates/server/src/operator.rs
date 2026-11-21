@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use circus_common::models::{Build, BuildStatus, Evaluation};
+use circus_common::{
+  models::{Build, BuildStatus, Evaluation},
+  overflow_demand,
+};
 use jiff::Timestamp;
 use serde::Serialize;
 use uuid::Uuid;
@@ -205,12 +208,17 @@ impl OperatorProject {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorQueueSystem {
-  pub system: String,
-  pub count:  i64,
+  pub system:              String,
+  pub count:               i64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub qemu_overflow_count: Option<u32>,
 }
 
 impl OperatorQueueSystem {
-  fn from_pending(pending: &[Build]) -> Vec<Self> {
+  fn from_pending(
+    pending: &[Build],
+    qemu_overflow_count: Option<u32>,
+  ) -> Vec<Self> {
     let mut queue_counts: HashMap<String, i64> = HashMap::new();
     for build in pending {
       let system = build
@@ -230,8 +238,11 @@ impl OperatorQueueSystem {
       .filter_map(|system| {
         queue_counts.get(*system).map(|count| {
           Self {
-            system: (*system).to_string(),
-            count:  *count,
+            system:              (*system).to_string(),
+            count:               *count,
+            qemu_overflow_count: (*system == "aarch64-linux")
+              .then_some(qemu_overflow_count)
+              .flatten(),
           }
         })
       })
@@ -241,8 +252,9 @@ impl OperatorQueueSystem {
           .filter(|(system, _)| !canonical_systems.contains(&system.as_str()))
           .map(|(system, count)| {
             Self {
-              system: system.clone(),
-              count:  *count,
+              system:              system.clone(),
+              count:               *count,
+              qemu_overflow_count: None,
             }
           }),
       )
@@ -354,7 +366,7 @@ pub async fn overview(
     .collect();
 
   let projects = OperatorProject::list(state, include_hidden).await?;
-  let queue_by_system = OperatorQueueSystem::from_pending(&pending_raw);
+  let queue_by_system = OperatorQueueSystem::from_pending(&pending_raw, None);
   let (workers, worker_online, worker_total) =
     OperatorWorker::list(state).await?;
 
@@ -448,7 +460,45 @@ pub async fn queue(state: &AppState) -> Result<Vec<OperatorQueueSystem>> {
   )
   .await
   .map_err(ApiError)?;
-  Ok(OperatorQueueSystem::from_pending(&pending))
+  let qemu_overflow_count = current_qemu_overflow_count(state).await;
+  let mut queue =
+    OperatorQueueSystem::from_pending(&pending, qemu_overflow_count);
+  if let Some(count) = qemu_overflow_count
+    && count > 0
+    && !queue.iter().any(|row| row.system == "aarch64-linux")
+  {
+    queue.push(OperatorQueueSystem {
+      system:              "aarch64-linux".to_owned(),
+      count:               0,
+      qemu_overflow_count: Some(count),
+    });
+  }
+  Ok(queue)
+}
+
+async fn current_qemu_overflow_count(state: &AppState) -> Option<u32> {
+  let overflow = state
+    .config
+    .queue_runner
+    .ephemeral_pools
+    .iter()
+    .find_map(|pool| pool.qemu_overflow.as_ref())?;
+  match overflow_demand::read_fresh(
+    &overflow.status_file,
+    overflow.status_ttl_secs,
+  )
+  .await
+  {
+    Ok(Some(report)) => Some(report.overflow_count),
+    Ok(None) => None,
+    Err(error) => {
+      tracing::warn!(
+        path = %overflow.status_file.display(),
+        "failed to read fresh QEMU overflow demand state: {error}"
+      );
+      None
+    },
+  }
 }
 
 /// Return worker summaries for the operator dashboard.

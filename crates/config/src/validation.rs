@@ -355,6 +355,7 @@ impl Config {
         );
       }
     }
+    let mut qemu_overflow_pools = 0;
     for (idx, pool) in self.queue_runner.ephemeral_pools.iter().enumerate() {
       if self
         .queue_runner
@@ -521,6 +522,60 @@ impl Config {
            poll_interval_secs must be greater than 0"
         );
       }
+      if let Some(overflow) = pool.qemu_overflow.as_ref() {
+        qemu_overflow_pools += 1;
+        if overflow.agent_name.trim().is_empty()
+          || overflow.agent_name == pool.name
+        {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}].qemu_overflow.agent_name \
+             must be a distinct non-empty agent name"
+          );
+        }
+        if overflow.system != "aarch64-linux"
+          || pool.systems.len() != 1
+          || pool.systems[0] != "aarch64-linux"
+        {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}] must be an \
+             aarch64-linux-only native pool when qemu_overflow is enabled"
+          );
+        }
+        if overflow.grace_secs == 0 || overflow.status_ttl_secs == 0 {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}].qemu_overflow grace_secs and \
+             status_ttl_secs must be greater than 0"
+          );
+        }
+        if !overflow.status_file.is_absolute() {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}].qemu_overflow.status_file \
+             must be an absolute path"
+          );
+        }
+        if overflow.supported_features.iter().any(|feature| {
+          feature == "big-parallel"
+            || !pool.supported_features.contains(feature)
+        }) {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}].qemu_overflow features must \
+             be supported by the native pool and cannot include big-parallel"
+          );
+        }
+        if overflow.allowed_build_repositories.is_empty()
+          || overflow.allowed_build_repositories
+            != pool.allowed_build_repositories
+        {
+          bail!(
+            "queue_runner.ephemeral_pools[{idx}].qemu_overflow.\
+             allowed_build_repositories must match the native pool's trusted \
+             repositories"
+          );
+        }
+      }
+    }
+    if qemu_overflow_pools > 1 {
+      bail!("only one queue_runner ephemeral qemu_overflow pool is supported");
     }
     if !matches!(
       self.cache_upload.compression.as_str(),

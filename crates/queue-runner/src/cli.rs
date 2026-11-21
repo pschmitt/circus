@@ -127,6 +127,12 @@ where
   let cache_upload_for_gc = cache_upload_config.clone();
   let qr_config = config.queue_runner;
   let ephemeral_pools = qr_config.ephemeral_pools.clone();
+  let qemu_overflow = qr_config.ephemeral_pools.iter().find_map(|pool| {
+    pool
+      .qemu_overflow
+      .clone()
+      .map(|overflow| (overflow, pool.allowed_build_repositories.clone()))
+  });
   let nix_store_dir = config.nix.store_dir;
   let store_dir_for_gc = nix_store_dir.clone();
 
@@ -194,6 +200,7 @@ where
     Arc::clone(&agent_pool),
     runner_caps,
     heartbeat_ttl,
+    qemu_overflow,
   ));
 
   {

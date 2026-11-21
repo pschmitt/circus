@@ -32,6 +32,7 @@ use circus_config::{
   HotConfig,
   LogConfig,
   NotificationsConfig,
+  QemuOverflowConfig,
   S3CacheConfig,
   SigningConfig,
 };
@@ -88,6 +89,7 @@ pub struct WorkerPool {
   agent_pool:          Arc<AgentPool>,
   runner_caps:         Arc<RunnerCaps>,
   heartbeat_ttl:       Duration,
+  qemu_overflow:       Option<(QemuOverflowConfig, Vec<String>)>,
   drain_token:         CancellationToken,
   active_builds:       ActiveBuilds,
   /// Longest jobset `build_timeout` dispatched so far, in seconds.
@@ -115,6 +117,7 @@ impl WorkerPool {
     agent_pool: Arc<AgentPool>,
     runner_caps: Arc<RunnerCaps>,
     heartbeat_ttl: Duration,
+    qemu_overflow: Option<(QemuOverflowConfig, Vec<String>)>,
   ) -> Self {
     let alert_manager = alert_config.map(AlertManager::new);
     let upload_concurrency = cache_upload_config.upload_concurrency.max(1);
@@ -135,6 +138,7 @@ impl WorkerPool {
       agent_pool,
       runner_caps,
       heartbeat_ttl,
+      qemu_overflow,
       drain_token: CancellationToken::new(),
       active_builds: Arc::new(DashMap::new()),
       longest_timeout: Arc::new(AtomicU64::new(0)),
@@ -223,6 +227,7 @@ impl WorkerPool {
     let agent_pool = Arc::clone(&self.agent_pool);
     let runner_caps = Arc::clone(&self.runner_caps);
     let heartbeat_ttl = self.heartbeat_ttl;
+    let qemu_overflow = self.qemu_overflow.clone();
     let active_builds = Arc::clone(&self.active_builds);
     let longest_timeout = Arc::clone(&self.longest_timeout);
     let build_id = build.id;
@@ -301,6 +306,7 @@ impl WorkerPool {
           agent_pool,
           runner_caps,
           heartbeat_ttl,
+          qemu_overflow,
         };
 
         if let Err(e) = run_build(ctx, &build).await {

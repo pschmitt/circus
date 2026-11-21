@@ -4,7 +4,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use circus_common::{PgPool, repo};
+use circus_common::{PgPool, overflow_demand, repo};
 use circus_config::{EphemeralPoolConfig, GithubActionsPoolConfig};
 use circus_http::RequestExt as _;
 use misstep::{ResultExt as _, bail};
@@ -55,9 +55,16 @@ struct WorkflowInputs<'a> {
 
 #[derive(Debug)]
 struct Demand {
-  eligible_pending: usize,
-  live_capacity:    u32,
-  live_agents:      u32,
+  eligible_pending:  usize,
+  live_capacity:     u32,
+  live_agents:       u32,
+  overflow_count:    u32,
+  inflight_capacity: u32,
+}
+
+struct EligibleBuild {
+  features:          Vec<String>,
+  overflow_eligible: bool,
 }
 
 impl Autoscaler {
@@ -113,39 +120,45 @@ impl Autoscaler {
 
   async fn tick(&mut self) -> misstep::Result<()> {
     self.prune_inflight();
-    if self.in_cooldown() {
-      return Ok(());
-    }
     let demand = self.demand().await?;
-    let pending = demand.eligible_pending as u32;
-    // A registered launch already shows in live_capacity, so only count
-    // inflight launches without an agent yet.
-    let pending_inflight =
-      (self.inflight.len() as u32).saturating_sub(demand.live_agents);
-    let available = demand.live_capacity.saturating_add(pending_inflight);
-    let deficit = pending.saturating_sub(available);
-    let remaining_inflight = self
-      .cfg
-      .max_inflight
-      .saturating_sub(self.inflight.len() as u32);
-    let launches = deficit.min(remaining_inflight);
-    if launches == 0 {
-      return Ok(());
-    }
+    let mut dispatch_error = None;
+    if !self.in_cooldown() {
+      let pending = demand.eligible_pending as u32;
+      // A registered launch already shows in live_capacity, so only count
+      // inflight launches without an agent yet.
+      let pending_inflight =
+        (self.inflight.len() as u32).saturating_sub(demand.live_agents);
+      let available = demand.live_capacity.saturating_add(pending_inflight);
+      let deficit = pending.saturating_sub(available);
+      let remaining_inflight = self
+        .cfg
+        .max_inflight
+        .saturating_sub(self.inflight.len() as u32);
+      let launches = deficit.min(remaining_inflight);
 
-    for _ in 0..launches {
-      if let Err(e) = self.dispatch_workflow().await {
-        // Cooldown on failure too, so a transient error does not respin the
-        // loop.
+      for _ in 0..launches {
+        // Reserve launch capacity before the request. A transport failure can
+        // mean GitHub accepted the workflow dispatch but its response was
+        // lost, so keep the reservation until its normal expiry.
+        self.inflight.push_back(InflightLaunch {
+          launched_at: Instant::now(),
+        });
         self.last_scale_up = Some(Instant::now());
-        return Err(e);
+        // Publish the reserved native slot before the external side effect,
+        // so the autoscaler cannot create a QEMU worker in the dispatch gap.
+        let reserved_demand = self.demand().await?;
+        self.publish_overflow_demand(&reserved_demand).await?;
+        if let Err(error) = self.dispatch_workflow().await {
+          // Cooldown on failure too, so a transient error does not respin the
+          // loop.
+          dispatch_error = Some(error);
+          break;
+        }
       }
-      self.inflight.push_back(InflightLaunch {
-        launched_at: Instant::now(),
-      });
-      self.last_scale_up = Some(Instant::now());
     }
-    Ok(())
+    let refreshed_demand = self.demand().await?;
+    self.publish_overflow_demand(&refreshed_demand).await?;
+    dispatch_error.map_or(Ok(()), Err)
   }
 
   fn prune_inflight(&mut self) {
@@ -200,7 +213,23 @@ impl Autoscaler {
             .any(|r| r == repo)
         })
       {
-        eligible_requirements.push(build.scheduling_features().to_vec());
+        let overflow_eligible =
+          self.cfg.qemu_overflow.as_ref().is_some_and(|overflow| {
+            let threshold = jiff::Timestamp::now().as_second().saturating_sub(
+              i64::try_from(overflow.grace_secs).unwrap_or(i64::MAX),
+            );
+            build.system.as_deref() == Some(overflow.system.as_str())
+              && build.created_at.as_second() <= threshold
+              && supports_required_features(
+                build.scheduling_features(),
+                &overflow.supported_features,
+                &[],
+              )
+          });
+        eligible_requirements.push(EligibleBuild {
+          features: build.scheduling_features().to_vec(),
+          overflow_eligible,
+        });
       }
     }
 
@@ -234,7 +263,12 @@ impl Autoscaler {
 
     // Total order on both sides so capacity does not depend on HashMap
     // iteration order. Constrained builds take the least-capable slot.
-    eligible_requirements.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+    eligible_requirements.sort_by(|a, b| {
+      b.features
+        .len()
+        .cmp(&a.features.len())
+        .then(a.features.cmp(&b.features))
+    });
     live_slots.sort_by(|a, b| {
       a.supported_features
         .len()
@@ -245,24 +279,61 @@ impl Autoscaler {
     });
 
     let mut live_capacity = 0u32;
-    for required in &eligible_requirements {
+    let mut matched = vec![false; eligible_requirements.len()];
+    for (idx, build) in eligible_requirements.iter().enumerate() {
       if let Some(pos) = live_slots.iter().position(|agent| {
         supports_required_features(
-          required,
+          &build.features,
           &agent.supported_features,
           &agent.mandatory_features,
         )
       }) {
         live_slots.remove(pos);
+        matched[idx] = true;
         live_capacity = live_capacity.saturating_add(1);
       }
     }
+
+    let inflight_capacity = (self.inflight.len() as u32)
+      .saturating_sub(live_agents)
+      .saturating_mul(self.cfg.max_jobs);
+    let overflow_count = calculate_overflow_count(
+      &eligible_requirements,
+      &matched,
+      inflight_capacity,
+    );
 
     Ok(Demand {
       eligible_pending: eligible_requirements.len(),
       live_capacity,
       live_agents,
+      overflow_count,
+      inflight_capacity,
     })
+  }
+
+  async fn publish_overflow_demand(
+    &self,
+    demand: &Demand,
+  ) -> misstep::Result<()> {
+    let Some(overflow) = self.cfg.qemu_overflow.as_ref() else {
+      return Ok(());
+    };
+    let report = overflow_demand::OverflowDemandReport {
+      published_at:             jiff::Timestamp::now().as_second(),
+      overflow_count:           demand.overflow_count,
+      native_live_capacity:     demand.live_capacity,
+      native_inflight_capacity: demand.inflight_capacity,
+    };
+    overflow_demand::write_atomic(&overflow.status_file, report)
+      .await
+      .map_err(|error| {
+        misstep::report!(
+          "publish QEMU overflow demand status {}: {error}",
+          overflow.status_file.display()
+        )
+      })?;
+    Ok(())
   }
 
   async fn dispatch_workflow(&self) -> misstep::Result<()> {
@@ -309,6 +380,19 @@ impl Autoscaler {
     );
     Ok(())
   }
+}
+
+fn calculate_overflow_count(
+  builds: &[EligibleBuild],
+  matched: &[bool],
+  inflight_capacity: u32,
+) -> u32 {
+  let unmatched = builds
+    .iter()
+    .zip(matched)
+    .filter(|(build, matched)| build.overflow_eligible && !**matched)
+    .count() as u32;
+  unmatched.saturating_sub(inflight_capacity)
 }
 
 fn csv(values: &[String]) -> String {
@@ -375,6 +459,24 @@ mod tests {
     };
     autoscaler.prune_inflight();
     assert!(autoscaler.inflight.is_empty());
+  }
+
+  #[test]
+  fn overflow_demand_excludes_native_live_and_inflight_capacity() {
+    let builds = vec![
+      EligibleBuild { features: Vec::new(), overflow_eligible: true },
+      EligibleBuild { features: Vec::new(), overflow_eligible: true },
+      EligibleBuild { features: Vec::new(), overflow_eligible: true },
+      EligibleBuild { features: Vec::new(), overflow_eligible: false },
+    ];
+    assert_eq!(
+      calculate_overflow_count(&builds, &[true, false, false, false], 1),
+      1,
+    );
+    assert_eq!(
+      calculate_overflow_count(&builds, &[true, false, false, false], 2),
+      0,
+    );
   }
 
   #[tokio::test]

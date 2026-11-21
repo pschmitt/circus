@@ -111,6 +111,9 @@ pub struct EphemeralPoolConfig {
   pub inflight_ttl_secs:          u64,
   pub scale_up_cooldown_secs:     u64,
   pub poll_interval_secs:         u64,
+  /// Optional emulated-architecture overflow pool coordinated by this native
+  /// pool. Only trusted, old jobs without native capacity may use it.
+  pub qemu_overflow:              Option<QemuOverflowConfig>,
   /// GitHub Actions launch settings for this pool.
   pub github_actions:             GithubActionsPoolConfig,
 }
@@ -130,7 +133,45 @@ impl Default for EphemeralPoolConfig {
       inflight_ttl_secs:          900,
       scale_up_cooldown_secs:     30,
       poll_interval_secs:         10,
+      qemu_overflow:              None,
       github_actions:             GithubActionsPoolConfig::default(),
+    }
+  }
+}
+
+/// Policy and shared status-file settings for a single QEMU ARM overflow
+/// agent pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QemuOverflowConfig {
+  /// Exact base name assigned to overflow agents (with a generated suffix).
+  pub agent_name:                 String,
+  /// Nix system handled through qemu-user emulation.
+  pub system:                     String,
+  /// Features this slow pool may accept. `big-parallel` is forbidden.
+  pub supported_features:         Vec<String>,
+  /// Trusted repositories inherited from the native ARM pool. Kept explicit
+  /// so dispatch can independently enforce the same trust boundary.
+  pub allowed_build_repositories: Vec<String>,
+  /// Minimum queue age before an otherwise eligible build can overflow.
+  pub grace_secs:                 u64,
+  /// Shared queue-runner/server status file, refreshed by the native pool.
+  pub status_file:                PathBuf,
+  /// Maximum age accepted for the status file by the operator API and
+  /// dispatch-time guard.
+  pub status_ttl_secs:            u64,
+}
+
+impl Default for QemuOverflowConfig {
+  fn default() -> Self {
+    Self {
+      agent_name:                 String::new(),
+      system:                     "aarch64-linux".to_owned(),
+      supported_features:         Vec::new(),
+      allowed_build_repositories: Vec::new(),
+      grace_secs:                 120,
+      status_file:                PathBuf::new(),
+      status_ttl_secs:            60,
     }
   }
 }

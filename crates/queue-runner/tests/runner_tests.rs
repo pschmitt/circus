@@ -85,6 +85,7 @@ async fn test_worker_pool_drain_stops_dispatch() {
       Vec::new(),
     )),
     std::time::Duration::from_mins(1),
+    None,
   );
 
   // Drain should not panic
@@ -203,6 +204,7 @@ async fn test_worker_pool_active_builds_cancel() {
       Vec::new(),
     )),
     std::time::Duration::from_mins(1),
+    None,
   );
 
   // Active builds map should start empty
