@@ -57,6 +57,7 @@ const fn admin_link(href: &'static str, label: &'static str) -> NavLink {
 
 const NAV: &[(&str, &[NavLink])] = &[
   ("Operate", &[
+    link("/dash", "Dashboard"),
     link("/builds", "Builds"),
     link("/queue", "Queue"),
     link("/evaluations", "Evaluations"),
