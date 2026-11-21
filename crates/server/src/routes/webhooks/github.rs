@@ -184,13 +184,15 @@ pub(super) fn github_repo_url_matches_full_name(
   repository_url: &str,
   full_name: &str,
 ) -> bool {
+  let url;
   let path = if let Some(path) = repository_url.strip_prefix("git@github.com:")
   {
     path
   } else {
-    let Ok(url) = Url::parse(repository_url) else {
+    let Ok(parsed) = Url::parse(repository_url) else {
       return false;
     };
+    url = parsed;
     if !url
       .host_str()
       .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
