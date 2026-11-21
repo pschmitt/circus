@@ -28,7 +28,8 @@ use super::shared::{DashboardContext, DashboardPage, UiTemplateConfig};
 use crate::{auth_middleware::session_extensions, state::AppState};
 
 static STYLESHEET: LazyLock<String> = LazyLock::new(|| {
-  let hash = HEXLOWER.encode(&Sha256::digest(super::super::STYLE_CSS.as_bytes()));
+  let hash =
+    HEXLOWER.encode(&Sha256::digest(super::super::STYLE_CSS.as_bytes()));
   format!("/static/style.css?v={hash}")
 });
 
@@ -255,7 +256,12 @@ pub async fn document(
               <div class="container">(child)</div>
             </main>
             <footer class="footer">
-              <p>(ui.brand_name.as_str()) " — " (ui.brand_subtitle.as_str())</p>
+              <p>
+                (ui.brand_name.as_str())
+                if !ui.brand_subtitle.is_empty() {
+                  " — " (ui.brand_subtitle.as_str())
+                }
+              </p>
               <p class="footer-version mono">"circus " (ui.version)</p>
             </footer>
           </div>
@@ -309,7 +315,9 @@ async fn sidebar(
           }
           <span class="brand-copy">
             <span class="brand-name">(ui.brand_name.as_str())</span>
-            <span class="brand-subtitle">(ui.brand_subtitle.as_str())</span>
+            if !ui.brand_subtitle.is_empty() {
+              <span class="brand-subtitle">(ui.brand_subtitle.as_str())</span>
+            }
           </span>
         </a>
       </div>
