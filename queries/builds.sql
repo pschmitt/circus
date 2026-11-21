@@ -64,7 +64,8 @@ WITH venues AS MATERIALIZED (
     supported_features text[],
     mandatory_features text[],
     runs_systemless bool,
-    requires_trusted_ref bool
+    requires_trusted_ref bool,
+    verified_pr_evaluations uuid[]
   )
 ),
 eligible_pending AS (
@@ -84,8 +85,10 @@ eligible_pending AS (
           )
           AND COALESCE(b.effective_features, b.required_features) <@ v.supported_features
           AND v.mandatory_features <@ COALESCE(b.effective_features, b.required_features)
-          AND (
-            NOT v.requires_trusted_ref
+          AND CASE
+            WHEN v.verified_pr_evaluations IS NOT NULL
+              THEN b.evaluation_id = ANY(v.verified_pr_evaluations)
+            ELSE NOT v.requires_trusted_ref
             OR EXISTS (
               SELECT 1
               FROM evaluations candidate
@@ -97,7 +100,7 @@ eligible_pending AS (
                 AND candidate.pr_base_branch IS NULL
                 AND candidate.trigger_kind IN ('source_change', 'manual', 'interval')
             )
-          )
+          END
       )
     )
     AND NOT EXISTS (

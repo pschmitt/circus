@@ -19,7 +19,7 @@ use std::{
     Arc,
     atomic::{AtomicU32, Ordering},
   },
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use circus_common::models::builds_system;
@@ -101,6 +101,7 @@ pub struct AgentMeta {
   pub auth_kind:          circus_common::models::AuthKind,
   pub oidc_repository:    Option<String>,
   pub oidc_subject:       Option<String>,
+  pub oidc_workflow_ref:  Option<String>,
 
   current_jobs:      Arc<AtomicU32>,
   pub active_builds: RwLock<HashSet<Uuid>>,
@@ -148,6 +149,7 @@ impl AgentMeta {
     auth_kind: circus_common::models::AuthKind,
     oidc_repository: Option<String>,
     oidc_subject: Option<String>,
+    oidc_workflow_ref: Option<String>,
     tx: mpsc::UnboundedSender<DispatchCommand>,
     closed: CancellationToken,
   ) -> Self {
@@ -166,6 +168,7 @@ impl AgentMeta {
       auth_kind,
       oidc_repository,
       oidc_subject,
+      oidc_workflow_ref,
       current_jobs: Arc::new(AtomicU32::new(0)),
       active_builds: RwLock::new(HashSet::new()),
       heartbeat: RwLock::new(HeartbeatSnapshot::default()),
@@ -222,6 +225,7 @@ impl AgentMeta {
       auth_kind: self.auth_kind,
       oidc_repository: self.oidc_repository.clone(),
       oidc_subject: self.oidc_subject.clone(),
+      oidc_workflow_ref: self.oidc_workflow_ref.clone(),
       heartbeat: hb,
     }
   }
@@ -267,6 +271,7 @@ pub struct AgentSnapshot {
   pub auth_kind:          circus_common::models::AuthKind,
   pub oidc_repository:    Option<String>,
   pub oidc_subject:       Option<String>,
+  pub oidc_workflow_ref:  Option<String>,
   pub heartbeat:          HeartbeatSnapshot,
 }
 
@@ -308,6 +313,49 @@ pub struct AgentPool {
   inner:       RwLock<HashMap<Uuid, Arc<AgentMeta>>>,
   /// Machines whose registration is between its checks and its insert.
   registering: parking_lot::Mutex<HashSet<Uuid>>,
+  pr_workflows: RwLock<HashMap<String, VerifiedPullRequests>>,
+}
+
+#[derive(Default)]
+struct VerifiedPullRequests {
+  evaluations: Vec<Uuid>,
+  expires_at: Option<Instant>,
+}
+
+impl AgentPool {
+  pub(crate) fn configure_pr_workflow(&self, workflow_ref: String) {
+    self.pr_workflows.write().entry(workflow_ref).or_default();
+  }
+
+  pub(crate) fn update_pr_workflow(
+    &self,
+    workflow_ref: &str,
+    mut evaluations: Vec<Uuid>,
+  ) {
+    if let Some(verified) = self.pr_workflows.write().get_mut(workflow_ref) {
+      evaluations.sort_unstable();
+      evaluations.dedup();
+      verified.evaluations = evaluations;
+      verified.expires_at = Some(Instant::now() + Duration::from_secs(30));
+    }
+    AGENT_CAPACITY_CHANGED.notify_waiters();
+  }
+
+  /// Some(empty) still denotes an isolated PR worker, with no current work
+  /// authorization. None denotes a worker outside the PR pools.
+  pub(crate) fn verified_pr_evaluations(
+    &self,
+    agent: &AgentSnapshot,
+  ) -> Option<Vec<Uuid>> {
+    let workflow_ref = agent.oidc_workflow_ref.as_deref()?;
+    let workflows = self.pr_workflows.read();
+    let verified = workflows.get(workflow_ref)?;
+    Some(if verified.expires_at.is_some_and(|expiry| Instant::now() < expiry) {
+      verified.evaluations.clone()
+    } else {
+      Vec::new()
+    })
+  }
 }
 
 // Hand-rolled to avoid requiring Debug on AgentMeta's mpsc sender.
@@ -552,6 +600,7 @@ mod tests {
       max_jobs,
       false,
       circus_common::models::AuthKind::Token,
+      None,
       None,
       None,
       tx,

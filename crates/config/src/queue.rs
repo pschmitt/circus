@@ -98,6 +98,11 @@ pub struct EphemeralPoolConfig {
   pub name:                       String,
   /// Source repositories this pool is allowed to build for (`owner/repo`).
   pub allowed_build_repositories: Vec<String>,
+  /// GitHub account IDs allowed to use this pool for same-repository PRs.
+  /// A nonempty list makes this a pull-request-only pool.
+  pub pull_request_author_ids:     Vec<u64>,
+  /// Runtime file containing a JSON array of additional GitHub account IDs.
+  pub pull_request_author_ids_file: Option<PathBuf>,
   /// Nix systems advertised by each GitHub Actions agent.
   pub systems:                    Vec<String>,
   /// Features advertised by each GitHub Actions agent.
@@ -123,6 +128,8 @@ impl Default for EphemeralPoolConfig {
     Self {
       name:                       "gha-x86_64-linux".to_owned(),
       allowed_build_repositories: Vec::new(),
+      pull_request_author_ids:     Vec::new(),
+      pull_request_author_ids_file: None,
       systems:                    vec!["x86_64-linux".to_owned()],
       supported_features:         Vec::new(),
       mandatory_features:         Vec::new(),
@@ -136,6 +143,24 @@ impl Default for EphemeralPoolConfig {
       qemu_overflow:              None,
       github_actions:             GithubActionsPoolConfig::default(),
     }
+  }
+}
+
+impl EphemeralPoolConfig {
+  #[must_use]
+  pub fn pull_request_workflow_ref(&self) -> Option<String> {
+    let workflow = &self.github_actions;
+    self.is_pull_request_pool().then(|| {
+      format!(
+        "{}/.github/workflows/{}@refs/heads/{}",
+        workflow.workflow_repository, workflow.workflow, workflow.ref_name
+      )
+    })
+  }
+
+  #[must_use]
+  pub fn is_pull_request_pool(&self) -> bool {
+    !self.pull_request_author_ids.is_empty() || self.pull_request_author_ids_file.is_some()
   }
 }
 

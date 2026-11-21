@@ -331,6 +331,7 @@ pub struct BuildVenue<'a> {
   pub runs_systemless:      bool,
   /// Whether this venue requires a branch evaluation before dispatch.
   pub requires_trusted_ref: bool,
+  pub verified_pr_evaluations: Option<Vec<Uuid>>,
 }
 
 /// List pending builds some venue can take, plus any older than

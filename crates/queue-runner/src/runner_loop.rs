@@ -431,6 +431,7 @@ pub async fn run(
           mandatory_features:   &agent.mandatory_features,
           runs_systemless:      false,
           requires_trusted_ref: worker_pool.agent_requires_trusted_ref(agent),
+          verified_pr_evaluations: worker_pool.agent_pool().verified_pr_evaluations(agent),
         }
       })
       .chain(worker_pool.runner_caps().venue())

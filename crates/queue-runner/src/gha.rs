@@ -12,9 +12,11 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-  dispatch::{supports_required_features, trusted_build_github_repository},
+  dispatch::{github_repository_slug, supports_required_features, trusted_build_github_repository},
   rpc::AgentPool,
 };
+
+mod pull_request;
 
 pub struct Autoscaler {
   cfg:            EphemeralPoolConfig,
@@ -72,12 +74,20 @@ impl Autoscaler {
   /// Returns an error if the GitHub token cannot be loaded or the HTTP client
   /// cannot be constructed.
   pub async fn new(
-    cfg: EphemeralPoolConfig,
+    mut cfg: EphemeralPoolConfig,
     pool: PgPool,
     agent_pool: Arc<AgentPool>,
     shutdown_token: CancellationToken,
   ) -> misstep::Result<Self> {
     load_token(&cfg.github_actions).await?;
+    if let Some(path) = &cfg.pull_request_author_ids_file {
+      let contents = tokio::fs::read_to_string(path)
+        .await
+        .context("read GitHub pull request author IDs")?;
+      let ids: Vec<u64> = serde_json::from_str(&contents)
+        .context("parse GitHub pull request author IDs")?;
+      cfg.pull_request_author_ids.extend(ids);
+    }
     let http = circus_http::api().build()?;
     Ok(Self {
       cfg,
@@ -144,8 +154,12 @@ impl Autoscaler {
         self.last_scale_up = Some(Instant::now());
         // Publish the reserved native slot before the external side effect,
         // so the autoscaler cannot create a QEMU worker in the dispatch gap.
-        let reserved_demand = self.demand().await?;
-        self.publish_overflow_demand(&reserved_demand).await?;
+        if self.cfg.qemu_overflow.is_some()
+          && !self.cfg.is_pull_request_pool()
+        {
+          let reserved_demand = self.demand().await?;
+          self.publish_overflow_demand(&reserved_demand).await?;
+        }
         if let Err(error) = self.dispatch_workflow().await {
           // Cooldown on failure too, so a transient error does not respin the
           // loop.
@@ -154,8 +168,12 @@ impl Autoscaler {
         }
       }
     }
-    let refreshed_demand = self.demand().await?;
-    self.publish_overflow_demand(&refreshed_demand).await?;
+    if self.cfg.qemu_overflow.is_some()
+      && !self.cfg.is_pull_request_pool()
+    {
+      let refreshed_demand = self.demand().await?;
+      self.publish_overflow_demand(&refreshed_demand).await?;
+    }
     dispatch_error.map_or(Ok(()), Err)
   }
 
@@ -181,9 +199,14 @@ impl Autoscaler {
       repo::builds::list_pending_for_systems(&self.pool, &self.cfg.systems)
         .await
         .context("load pending builds for GHA autoscaler")?;
+    let pr_workflow = self.cfg.pull_request_workflow_ref();
+    let pr_token = if pr_workflow.is_some() {
+      Some(load_token(&self.cfg.github_actions).await?)
+    } else {
+      None
+    };
     let mut eligible_requirements = Vec::new();
-    let mut trusted_cache: HashMap<uuid::Uuid, Option<Option<String>>> =
-      HashMap::new();
+    let mut eligibility = HashMap::new();
     for build in builds {
       if !supports_required_features(
         build.scheduling_features(),
@@ -192,27 +215,30 @@ impl Autoscaler {
       ) {
         continue;
       }
-      let trusted_repo =
-        if let Some(cached) = trusted_cache.get(&build.evaluation_id) {
-          cached.clone()
+      let allowed = if let Some(cached) = eligibility.get(&build.evaluation_id) {
+        *cached
+      } else {
+        let allowed = if let Some(token) = pr_token.as_deref() {
+          match self.verify_pull_request(build.evaluation_id, token).await {
+            Ok(allowed) => allowed,
+            Err(error) => {
+              tracing::warn!(evaluation_id = %build.evaluation_id, %error,
+                "could not verify GitHub pull request");
+              false
+            },
+          }
         } else {
-          let repo = trusted_build_github_repository(&self.pool, &build).await;
-          trusted_cache.insert(build.evaluation_id, repo.clone());
-          repo
+          trusted_build_github_repository(&self.pool, &build)
+            .await
+            .flatten()
+            .is_some_and(|repo| self.cfg.allowed_build_repositories.contains(&repo))
         };
-      if trusted_repo
-        .as_ref()
-        .and_then(|repo| repo.as_deref())
-        .is_some_and(|repo| {
-          self
-            .cfg
-            .allowed_build_repositories
-            .iter()
-            .any(|r| r == repo)
-        })
-      {
-        let overflow_eligible =
-          self.cfg.qemu_overflow.as_ref().is_some_and(|overflow| {
+        eligibility.insert(build.evaluation_id, allowed);
+        allowed
+      };
+      if allowed {
+        let overflow_eligible = pr_workflow.is_none()
+          && self.cfg.qemu_overflow.as_ref().is_some_and(|overflow| {
             let threshold = jiff::Timestamp::now().as_second().saturating_sub(
               i64::try_from(overflow.grace_secs).unwrap_or(i64::MAX),
             );
@@ -231,6 +257,13 @@ impl Autoscaler {
       }
     }
 
+    if let Some(workflow) = pr_workflow.as_deref() {
+      let verified = eligibility.into_iter()
+        .filter_map(|(id, allowed)| allowed.then_some(id))
+        .collect();
+      self.agent_pool.update_pr_workflow(workflow, verified);
+    }
+
     let gha = &self.cfg.github_actions;
     let live: Vec<_> = self
       .agent_pool
@@ -241,6 +274,10 @@ impl Autoscaler {
           && agent.auth_kind == circus_common::models::AuthKind::Oidc
           && agent.oidc_repository.as_deref()
             == Some(gha.workflow_repository.as_str())
+          && match pr_workflow.as_deref() {
+            Some(workflow) => agent.oidc_workflow_ref.as_deref() == Some(workflow),
+            None => self.agent_pool.verified_pr_evaluations(agent).is_none(),
+          }
           && agent_name_matches_pool(&agent.name, &self.cfg.name)
           && self
             .cfg
@@ -332,6 +369,47 @@ impl Autoscaler {
         )
       })?;
     Ok(())
+  }
+
+  async fn verify_pull_request(
+    &self,
+    evaluation_id: uuid::Uuid,
+    token: &str,
+  ) -> misstep::Result<bool> {
+    let evaluation = repo::evaluations::get(&self.pool, evaluation_id).await?;
+    let (Some(number), Some(head), Some(base)) = (
+      evaluation.pr_number,
+      evaluation.pr_head_branch.as_deref(),
+      evaluation.pr_base_branch.as_deref(),
+    ) else {
+      return Ok(false);
+    };
+    if evaluation.superseded_by.is_some() {
+      return Ok(false);
+    }
+    let jobset = repo::jobsets::get(&self.pool, evaluation.jobset_id).await?;
+    let project = repo::projects::get(&self.pool, jobset.project_id).await?;
+    let Some(repository) = github_repository_slug(&project.repository_url) else {
+      return Ok(false);
+    };
+    if repository != self.cfg.github_actions.workflow_repository
+      || !self.cfg.allowed_build_repositories.contains(&repository)
+      || jobset.branch.as_deref() != Some(base)
+    {
+      return Ok(false);
+    }
+    pull_request::verify(
+      &self.http,
+      token,
+      &pull_request::Candidate {
+        repository: &repository,
+        number,
+        commit: &evaluation.commit_hash,
+        head,
+        base,
+      },
+      &self.cfg.pull_request_author_ids,
+    ).await
   }
 
   async fn dispatch_workflow(&self) -> misstep::Result<()> {

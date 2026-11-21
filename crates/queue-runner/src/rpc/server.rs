@@ -847,6 +847,7 @@ impl runner::Server for RunnerImpl {
         auth_kind,
         oidc_identity.as_ref().map(|id| id.repository.clone()),
         oidc_identity.as_ref().map(|id| id.subject.clone()),
+        oidc_identity.and_then(|id| id.workflow_ref),
         tx,
         closed,
       ));

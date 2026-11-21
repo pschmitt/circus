@@ -425,6 +425,9 @@ async fn select_and_reserve_agent(
   }) {
     let trusted = trusted_build_context(&ctx.pool, build).await;
     candidates.retain(|(_, snap)| {
+      if let Some(verified) = ctx.agent_pool.verified_pr_evaluations(snap) {
+        return verified.binary_search(&build.evaluation_id).is_ok();
+      }
       candidate_allowed_for_trusted_build(snap, trusted.as_ref())
         && ctx.qemu_overflow.as_ref().is_none_or(|(overflow, repos)| {
           !is_qemu_overflow_agent(&snap.name, overflow)
@@ -922,6 +925,7 @@ mod tests {
       auth_kind,
       oidc_repository: oidc_repository.map(str::to_owned),
       oidc_subject: None,
+      oidc_workflow_ref: None,
       heartbeat: HeartbeatSnapshot::default(),
     }
   }

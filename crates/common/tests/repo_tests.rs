@@ -204,6 +204,7 @@ async fn list_pending_x86(
     mandatory_features:   &[],
     runs_systemless:      true,
     requires_trusted_ref: false,
+    verified_pr_evaluations: None,
   };
   repo::builds::list_pending(pool, &[venue], None, limit, schedulable_capacity)
     .await
@@ -1782,6 +1783,7 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
     mandatory_features:   &[],
     runs_systemless:      false,
     requires_trusted_ref: true,
+    verified_pr_evaluations: None,
   };
   let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
     .await
@@ -1794,11 +1796,31 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
     mandatory_features:   &[],
     runs_systemless:      false,
     requires_trusted_ref: false,
+    verified_pr_evaluations: None,
   };
   let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
     .await
     .expect("list pending for unrestricted venue");
   assert_eq!(pending.first().map(|build| build.id), Some(pr_build.id));
+
+  let pr_venue = |verified| repo::builds::BuildVenue {
+    systems:                 &systems,
+    supported_features:      &[],
+    mandatory_features:      &[],
+    runs_systemless:         false,
+    requires_trusted_ref:    true,
+    verified_pr_evaluations: Some(verified),
+  };
+  let pending =
+    repo::builds::list_pending(&pool, &[pr_venue(vec![])], None, 2, 1)
+      .await
+      .expect("list pending for a PR worker without approvals");
+  assert!(pending.is_empty());
+  let pending =
+    repo::builds::list_pending(&pool, &[pr_venue(vec![pr.id])], None, 2, 1)
+      .await
+      .expect("list pending for a PR worker with an exact approval");
+  assert_eq!(pending.iter().map(|b| b.id).collect::<Vec<_>>(), vec![pr_build.id]);
 
   let _ = repo::projects::delete(&pool, project.id).await;
 }

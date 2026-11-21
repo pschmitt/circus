@@ -99,6 +99,7 @@ impl RunnerCaps {
         mandatory_features:   &[],
         runs_systemless:      true,
         requires_trusted_ref: false,
+        verified_pr_evaluations: None,
       }
     })
   }
