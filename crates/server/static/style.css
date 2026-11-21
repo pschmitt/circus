@@ -836,9 +836,88 @@ pre {
   border-right: 1px solid var(--border);
 }
 
+.sidebar-collapse-input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+
+.sidebar-collapse-toggle {
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-end: 8px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sidebar-collapse-toggle:hover { color: var(--text); }
+.sidebar-collapse-input:focus-visible + .sidebar-brand .sidebar-collapse-toggle {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.sidebar-collapse-toggle > span {
+  width: 8px;
+  height: 8px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.sidebar-collapse-input:checked + .sidebar-brand .sidebar-collapse-toggle > span {
+  transform: rotate(225deg);
+}
+
+.sidebar-nav-icon {
+  flex: 0 0 1rem;
+  text-align: center;
+  line-height: 1;
+}
+
+@media (min-width: 761px) {
+  .app-shell:has(> .sidebar > .sidebar-collapse-input:checked) {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .sidebar:has(> .sidebar-collapse-input:checked) {
+    width: auto;
+    min-width: 0;
+  }
+
+  .sidebar-collapse-input:checked + .sidebar-brand > a,
+  .sidebar-collapse-input:checked ~ .nav-group .nav-label,
+  .sidebar-collapse-input:checked ~ .nav-group .sidebar-nav-link-label {
+    display: none;
+  }
+
+  .sidebar-collapse-input:checked ~ .nav-group {
+    margin-top: 8px;
+  }
+
+  .sidebar-collapse-input:checked ~ .nav-group .nav-links a {
+    justify-content: center;
+    margin-inline: 4px;
+    padding-inline: 0 2px;
+  }
+}
+
+@media (max-width: 760px) {
+  .sidebar-collapse-input:checked ~ .nav-group {
+    display: none;
+  }
+}
+
 .sidebar-brand {
+  position: relative;
   height: 48px;
-  padding: 12px 14px;
+  padding: 12px 48px 12px 14px;
 }
 
 .sidebar-brand a {
@@ -970,6 +1049,7 @@ pre {
 .nav-links a {
   display: flex;
   align-items: center;
+  gap: 7px;
   height: 28px;
   margin: 0 10px;
   padding: 0 8px 0 10px;

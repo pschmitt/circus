@@ -36,41 +36,52 @@ static STYLESHEET: LazyLock<String> = LazyLock::new(|| {
 struct NavLink {
   href:  &'static str,
   label: &'static str,
+  icon:  &'static str,
   admin: bool,
 }
 
-const fn link(href: &'static str, label: &'static str) -> NavLink {
+const fn link(
+  href: &'static str,
+  label: &'static str,
+  icon: &'static str,
+) -> NavLink {
   NavLink {
     href,
     label,
+    icon,
     admin: false,
   }
 }
 
-const fn admin_link(href: &'static str, label: &'static str) -> NavLink {
+const fn admin_link(
+  href: &'static str,
+  label: &'static str,
+  icon: &'static str,
+) -> NavLink {
   NavLink {
     href,
     label,
+    icon,
     admin: true,
   }
 }
 
 const NAV: &[(&str, &[NavLink])] = &[
   ("Operate", &[
-    link("/dash", "Dashboard"),
-    link("/builds", "Builds"),
-    link("/queue", "Queue"),
-    link("/evaluations", "Evaluations"),
-    link("/projects", "Projects"),
-    link("/channels", "Channels"),
-    link("/starred", "Starred"),
-    link("/metrics", "Metrics"),
+    link("/dash", "Dashboard", "◈"),
+    link("/builds", "Builds", "▣"),
+    link("/queue", "Queue", "≡"),
+    link("/evaluations", "Evaluations", "◷"),
+    link("/projects", "Projects", "▤"),
+    link("/channels", "Channels", "⇄"),
+    link("/starred", "Starred", "☆"),
+    link("/metrics", "Metrics", "▥"),
   ]),
   ("System", &[
-    link("/news", "News"),
-    admin_link("/caches", "Caches"),
-    admin_link("/users", "Users"),
-    admin_link("/admin", "Admin"),
+    link("/news", "News", "✦"),
+    admin_link("/caches", "Caches", "▱"),
+    admin_link("/users", "Users", "♙"),
+    admin_link("/admin", "Admin", "⚙"),
   ]),
 ];
 
@@ -309,6 +320,7 @@ async fn sidebar(
 
   Ok(view! {
     <aside class="sidebar" aria-label="Primary navigation">
+      <input type="checkbox" id="sidebar-collapsed" class="sidebar-collapse-input" aria-label="Collapse sidebar">
       <div class="sidebar-brand">
         <a href="/">
           if ui.has_logo {
@@ -321,6 +333,9 @@ async fn sidebar(
             }
           </span>
         </a>
+        <label class="sidebar-collapse-toggle" for="sidebar-collapsed" title="Toggle sidebar">
+          <span aria-hidden="true"></span>
+        </label>
       </div>
       for (label, links) in NAV {
         <div class="nav-group">
@@ -329,9 +344,12 @@ async fn sidebar(
             for link in links.iter().filter(|link| viewer.is_admin || !link.admin) {
               <a
                 href=(link.href)
+                aria-label=(link.label)
+                title=(link.label)
                 class=(if nav_active(path, link.href) { "active" } else { "" })
               >
-                (link.label)
+                <span class="sidebar-nav-icon" aria-hidden="true">(link.icon)</span>
+                <span class="sidebar-nav-link-label">(link.label)</span>
               </a>
             }
           </div>
