@@ -369,6 +369,10 @@ pre {
   background: var(--status-failed);
 }
 
+.simple-status.skipped {
+  background: var(--text-subtle);
+}
+
 .simple-status-label,
 .simple-effect-state-label {
   color: var(--text-muted);
@@ -378,6 +382,61 @@ pre {
 .simple-status-label.failed,
 .simple-effect-state-label.failed {
   color: var(--status-failed);
+}
+
+.simple-project-list,
+.simple-worker-list {
+  list-style: none;
+}
+
+.simple-project-list > li,
+.simple-worker-list > li {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.simple-project-main,
+.simple-worker-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 3px;
+}
+
+.simple-project-main strong,
+.simple-worker-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+}
+
+.simple-project-main > span,
+.simple-worker-main > span,
+.simple-worker-jobs,
+.simple-project-health time,
+.simple-project-queued {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-project-health {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.simple-project-health time {
+  white-space: nowrap;
+}
+
+.simple-project-queued {
+  white-space: nowrap;
 }
 
 .simple-empty {
@@ -479,6 +538,33 @@ pre {
   .simple-status-label {
     grid-column: 2;
     margin-top: -8px;
+  }
+
+  .simple-project-list > li,
+  .simple-worker-list > li {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+  }
+
+  .simple-project-main,
+  .simple-worker-main {
+    flex-basis: calc(100% - 22px);
+  }
+
+  .simple-project-health {
+    width: 100%;
+    justify-content: flex-start;
+    padding-left: 22px;
+    flex-wrap: wrap;
+  }
+
+  .simple-project-health time {
+    margin-left: auto;
+  }
+
+  .simple-worker-jobs {
+    margin-left: 0;
   }
 }
 

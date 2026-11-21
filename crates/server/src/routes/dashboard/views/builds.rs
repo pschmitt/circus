@@ -1286,7 +1286,9 @@ async fn products_panel(
 }
 
 #[page("/build/{id}/log")]
-async fn build_log_page(cx: &Cx) -> Result<impl View> {
+pub(in crate::routes::dashboard) async fn build_log_page(
+  cx: &Cx,
+) -> Result<impl View> {
   let viewer = viewer(cx, DashboardPage::Build).await?;
   let state = app_context::<AppState>(cx);
   let id = *path_param::<Id>(cx)?;

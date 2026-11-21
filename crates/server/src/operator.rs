@@ -121,19 +121,24 @@ pub struct OperatorProject {
 
 impl OperatorProject {
   async fn list(state: &AppState, include_hidden: bool) -> Result<Vec<Self>> {
-    let all_projects = circus_common::repo::projects::list(&state.pool, 100, 0)
-      .await
-      .map_err(ApiError)?;
+    let mut all_projects = Vec::new();
+    let mut offset = 0;
+    loop {
+      let page = circus_common::repo::projects::list(&state.pool, 100, offset)
+        .await
+        .map_err(ApiError)?;
+      if page.is_empty() {
+        break;
+      }
+      offset += page.len() as i64;
+      all_projects.extend(page);
+    }
     let mut project_summaries = Vec::with_capacity(all_projects.len());
     for p in &all_projects {
-      let jobsets = circus_common::repo::jobsets::list_for_project(
-        &state.pool,
-        p.id,
-        100,
-        0,
-      )
-      .await
-      .map_err(ApiError)?;
+      let jobsets =
+        circus_common::repo::jobsets::list_all_for_project(&state.pool, p.id)
+          .await
+          .map_err(ApiError)?;
       let mut last_eval: Option<Evaluation> = None;
       for js in &jobsets {
         let js_evals =

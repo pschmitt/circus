@@ -169,7 +169,7 @@ struct LoginQuery {
 }
 
 #[page("/login")]
-async fn login(cx: &Cx) -> Result<impl View> {
+pub(in crate::routes::dashboard) async fn login(cx: &Cx) -> Result<impl View> {
   let state = app_context::<AppState>(cx);
   let query = query_params::<LoginQuery>(cx)?;
   let sign_in_error = result_code::<SignInError>(query.error.as_deref());

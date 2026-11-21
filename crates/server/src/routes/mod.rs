@@ -370,9 +370,10 @@ pub fn ui_router(
   }
 
   if let Some(assets) = dashboard_assets {
-    let live = dashboard::live::service(state.clone(), assets);
+    let live = dashboard::live::service(state.clone(), assets.clone());
+    let build_live = dashboard::live::build_service(state.clone(), assets);
     router = router.merge(
-      dashboard::router(live)
+      dashboard::router(live, build_live)
         .route_layer(middleware::from_fn_with_state(state, extract_session)),
     );
   }

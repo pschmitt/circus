@@ -31,10 +31,16 @@ pub(crate) mod views;
 
 /// Topcoat pages route their GETs to `live`, which also serves the runtime
 /// under `/_topcoat`.
-pub fn router(live: TowerService) -> Router<AppState> {
+pub fn router(
+  live: TowerService,
+  build_live: TowerService,
+) -> Router<AppState> {
   Router::new()
     .route("/queue", get_service(live.clone()))
-    .route("/login", get_service(live.clone()).post(auth::login_action))
+    .route(
+      "/login",
+      get_service(build_live.clone()).post(auth::login_action),
+    )
     .route("/logout", post(auth::logout_action))
     .route("/account", get_service(live.clone()))
     .route(
@@ -43,7 +49,7 @@ pub fn router(live: TowerService) -> Router<AppState> {
     )
     .route("/account/unlink/{provider}", post(auth::account_unlink))
     .route("/", get_service(live.clone()))
-    .route("/simple", get_service(live.clone()))
+    .route("/simple", get_service(build_live.clone()))
     .route(
       "/projects",
       get_service(live.clone()).post(admin::project_create),
@@ -77,7 +83,7 @@ pub fn router(live: TowerService) -> Router<AppState> {
     .route("/evaluation/{id}/restart", post(admin::evaluation_restart))
     .route("/builds", get_service(live.clone()))
     .route("/build/{id}", get_service(live.clone()))
-    .route("/build/{id}/log", get_service(live.clone()))
+    .route("/build/{id}/log", get_service(build_live.clone()))
     .route("/build/{id}/bump", post(admin::queue_bump))
     .route("/channels", get_service(live.clone()))
     .route("/channel/{id}", get_service(live.clone()))
@@ -109,5 +115,6 @@ pub fn router(live: TowerService) -> Router<AppState> {
     .route("/caches/{name}", get_service(live.clone()))
     .route("/caches/{name}/gc", post(admin::cache_gc))
     .route("/caches/{name}/nars", get_service(live.clone()))
-    .route_service("/_topcoat/{*rest}", live)
+    .route_service("/_build-live", build_live.clone())
+    .route_service("/_topcoat/{*rest}", build_live)
 }

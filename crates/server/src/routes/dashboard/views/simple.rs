@@ -14,7 +14,7 @@ use topcoat::{
 use super::super::{
   layout::{document, shard_viewer, viewer},
   live::{BuildsChanged, Wake},
-  shared::{BuildView, DashboardPage},
+  shared::{BuildView, DashboardPage, ProjectSummaryView},
 };
 use crate::{operator, state::AppState};
 
@@ -34,14 +34,27 @@ struct EffectStatus {
 }
 
 struct BuildActivity {
-  builds:  Vec<BuildView>,
-  running: i64,
-  queued:  i64,
-  failed:  i64,
+  builds:   Vec<BuildView>,
+  projects: Vec<ProjectSummaryView>,
+  workers:  Vec<WorkerView>,
+  running:  i64,
+  queued:   i64,
+  failed:   i64,
+}
+
+struct WorkerView {
+  name:         String,
+  systems:      String,
+  status_text:  &'static str,
+  status_class: &'static str,
+  current_jobs: i32,
+  max_jobs:     i32,
 }
 
 #[page("/simple")]
-async fn simple_page(cx: &Cx) -> Result<impl View> {
+pub(in crate::routes::dashboard) async fn simple_page(
+  cx: &Cx,
+) -> Result<impl View> {
   let viewer = viewer(cx, DashboardPage::Home).await?;
   Ok(view! {
     document(title: "Builds", viewer: &viewer, topbar: false,
@@ -59,7 +72,7 @@ async fn simple_page(cx: &Cx) -> Result<impl View> {
         <main class="simple-content">
           <div class="simple-title">
             <h1>"NixOS builds"</h1>
-            <p>"Live activity for the nixos-config repository."</p>
+            <p>"Repositories, workers, and recent build logs."</p>
           </div>
           build_activity()
           effects_activity()
@@ -74,7 +87,9 @@ async fn simple_page(cx: &Cx) -> Result<impl View> {
 }
 
 #[shard]
-async fn build_activity(cx: &Cx) -> Result<impl View> {
+pub(in crate::routes::dashboard) async fn build_activity(
+  cx: &Cx,
+) -> Result<impl View> {
   let viewer = shard_viewer(cx, DashboardPage::Home).await?;
   let state = app_context::<AppState>(cx);
   let mut changed = BuildsChanged::subscribe(cx);
@@ -82,14 +97,23 @@ async fn build_activity(cx: &Cx) -> Result<impl View> {
 
   Ok(live! {
     loop {
-      let running = activity.running > 0;
       let token = emit! { build_activity_view(activity: &activity) }?;
-      match changed.next(cx, DashboardPage::Home, running).await? {
-        None => break Ok(token),
-        Some(Wake::Changed(current)) => {
-          activity = load_builds(state, current.is_admin).await;
+      tokio::select! {
+        wake = changed.next(cx, DashboardPage::Home, false) => {
+          match wake? {
+            None => break Ok(token),
+            Some(Wake::Changed(current)) => {
+              activity = load_builds(state, current.is_admin).await;
+            },
+            Some(Wake::Tick) => {},
+          }
         },
-        Some(Wake::Tick) => {},
+        () = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+          if !topcoat::runtime::connected(cx) {
+            break Ok(token);
+          }
+          activity.workers = load_workers(state).await;
+        },
       }
     }
   })
@@ -110,6 +134,17 @@ async fn load_builds(state: &AppState, include_hidden: bool) -> BuildActivity {
     .unwrap_or_default();
   BuildActivity {
     builds,
+    projects: overview
+      .as_ref()
+      .map(|overview| {
+        overview
+          .projects
+          .iter()
+          .map(ProjectSummaryView::from)
+          .collect()
+      })
+      .unwrap_or_default(),
+    workers: load_workers(state).await,
     running: overview
       .as_ref()
       .map_or(0, |overview| overview.running_builds),
@@ -120,6 +155,38 @@ async fn load_builds(state: &AppState, include_hidden: bool) -> BuildActivity {
       .as_ref()
       .map_or(0, |overview| overview.failed_builds),
   }
+}
+
+async fn load_workers(state: &AppState) -> Vec<WorkerView> {
+  circus_common::repo::builder_sessions::list(&state.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|worker| {
+      WorkerView {
+        name:         worker.name,
+        systems:      if worker.systems.is_empty() {
+          "unknown".to_owned()
+        } else {
+          worker.systems.join(", ")
+        },
+        status_text:  if !worker.connected {
+          "offline"
+        } else if worker.current_jobs > 0 {
+          "busy"
+        } else {
+          "idle"
+        },
+        status_class: if !worker.connected {
+          "skipped"
+        } else {
+          "running"
+        },
+        current_jobs: worker.current_jobs,
+        max_jobs:     worker.max_jobs,
+      }
+    })
+    .collect()
 }
 
 #[component]
@@ -142,10 +209,67 @@ async fn build_activity_view(activity: &BuildActivity) -> Result<impl View> {
             <li>
               <span class=(format!("simple-status {}", build.status_class)) aria-hidden="true"></span>
               <div class="simple-build-main">
-                <strong>(build.job_name.as_str())</strong>
+                if build.has_log {
+                  <a href=(format!("/build/{}/log", build.id))><strong>(build.job_name.as_str())</strong></a>
+                } else {
+                  <strong>(build.job_name.as_str())</strong>
+                }
                 <span>(build.project_name.as_str()) " · " (build.system.as_str())</span>
               </div>
               <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
+            </li>
+          }
+        </ul>
+      }
+    </section>
+    <section class="simple-section" aria-labelledby="repositories-heading">
+      <div class="simple-section-heading">
+        <h2 id="repositories-heading">"Repositories"</h2>
+        <span class="simple-section-note">(activity.projects.len()) " configured"</span>
+      </div>
+      if activity.projects.is_empty() {
+        <p class="simple-empty">"No repository information is available yet."</p>
+      } else {
+        <ul class="simple-project-list">
+          for project in &activity.projects {
+            <li>
+              <div class="simple-project-main">
+                <a href=(format!("/project/{}", project.id))><strong>(project.name.as_str())</strong></a>
+                <span>(project.jobset_count) " jobsets · " (project.systems.as_str())</span>
+              </div>
+              <div class="simple-project-health">
+                <span class=(format!("simple-status-label {}", project.last_eval_class))>(project.last_eval_status.as_str())</span>
+                if project.failing_jobs > 0 {
+                  <span class="simple-status-label failed">(project.failing_jobs) " failing"</span>
+                }
+                if project.queued_jobs > 0 {
+                  <span class="simple-project-queued">(project.queued_jobs) " queued"</span>
+                }
+                <time>(project.last_eval_time.as_str())</time>
+              </div>
+            </li>
+          }
+        </ul>
+      }
+    </section>
+    <section class="simple-section" aria-labelledby="workers-heading">
+      <div class="simple-section-heading">
+        <h2 id="workers-heading">"Workers"</h2>
+        <span class="simple-section-note">(activity.workers.len()) " registered"</span>
+      </div>
+      if activity.workers.is_empty() {
+        <p class="simple-empty">"No workers have registered."</p>
+      } else {
+        <ul class="simple-worker-list">
+          for worker in &activity.workers {
+            <li>
+              <span class=(format!("simple-status {}", worker.status_class)) aria-hidden="true"></span>
+              <div class="simple-worker-main">
+                <strong>(worker.name.as_str())</strong>
+                <span>(worker.systems.as_str())</span>
+              </div>
+              <span class=(format!("simple-status-label {}", worker.status_class))>(worker.status_text)</span>
+              <span class="simple-worker-jobs">(worker.current_jobs) "/" (worker.max_jobs) " jobs"</span>
             </li>
           }
         </ul>
@@ -155,7 +279,9 @@ async fn build_activity_view(activity: &BuildActivity) -> Result<impl View> {
 }
 
 #[shard]
-async fn effects_activity(cx: &Cx) -> Result<impl View> {
+pub(in crate::routes::dashboard) async fn effects_activity(
+  cx: &Cx,
+) -> Result<impl View> {
   shard_viewer(cx, DashboardPage::Home).await?;
   Ok(live! {
     loop {

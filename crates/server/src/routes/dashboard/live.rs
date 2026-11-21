@@ -9,6 +9,7 @@ use topcoat::{
   asset::{AssetBundle, RouterBuilderAssetExt},
   context::{Cx, app_context},
   router::{
+    Body,
     Router,
     RouterBuilderDiscoverExt,
     page,
@@ -101,6 +102,47 @@ impl BuildsChanged {
 
 #[must_use]
 pub fn service(state: AppState, assets: AssetBundle) -> TowerService {
+  let receiver = build_updates(&state);
+  let router = Router::builder()
+    .app_context(state)
+    .app_context(BuildsChanged { receiver, ticks: 0 })
+    .discover()
+    .assets(assets)
+    .runtime()
+    .build();
+  TowerService::new(router)
+}
+
+/// A Topcoat runtime for build.brkn.lol. Its WebSocket render router contains
+/// only the compact dashboard and build-log pages, plus their live shards.
+pub fn build_service(state: AppState, assets: AssetBundle) -> TowerService {
+  use topcoat::{
+    router::{Method, Page, PageFn},
+    view::BoxView,
+  };
+
+  fn root_page(cx: &Cx, body: Body) -> BoxView<'_> {
+    super::views::simple::simple_page.render(cx, body)
+  }
+
+  let receiver = build_updates(&state);
+  let router = Router::builder()
+    .app_context(state)
+    .app_context(BuildsChanged { receiver, ticks: 0 })
+    .page(PageFn::new(Method::GET, "/", root_page))
+    .page(super::views::simple::simple_page)
+    .page(super::views::account::login)
+    .page(super::views::builds::build_log_page)
+    .layout(super::layout::root)
+    .route(super::views::simple::build_activity)
+    .route(super::views::simple::effects_activity)
+    .assets(assets)
+    .runtime()
+    .build();
+  TowerService::new(router)
+}
+
+fn build_updates(state: &AppState) -> watch::Receiver<u64> {
   let wakeup = Arc::new(Notify::new());
   let (sender, receiver) = watch::channel(0);
   pg_notify::spawn_listener(
@@ -114,15 +156,7 @@ pub fn service(state: AppState, assets: AssetBundle) -> TowerService {
       sender.send_modify(|generation| *generation += 1);
     }
   });
-
-  let router = Router::builder()
-    .app_context(state)
-    .app_context(BuildsChanged { receiver, ticks: 0 })
-    .discover()
-    .assets(assets)
-    .runtime()
-    .build();
-  TowerService::new(router)
+  receiver
 }
 
 #[query_params(error = bad_request)]
