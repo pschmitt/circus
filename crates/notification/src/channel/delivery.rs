@@ -334,20 +334,30 @@ fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
       }
     },
   };
-  let completed = event.jobs.total - event.jobs.pending - event.jobs.running;
+  let progress = if event.jobs.total == 0 {
+    String::new()
+  } else {
+    let completed = event.jobs.total - event.jobs.pending - event.jobs.running;
+    let headline = if event.evaluation_status == EvaluationStatus::Running {
+      format!("{} jobs discovered", event.jobs.total)
+    } else {
+      format!("{completed}/{} jobs complete", event.jobs.total)
+    };
+    format!(
+      "**{headline}** · {} succeeded · {} failed · {} running · {} queued · {} \
+       cancelled · {} skipped\n\n",
+      event.jobs.succeeded,
+      event.jobs.failed,
+      event.jobs.running,
+      event.jobs.pending,
+      event.jobs.cancelled,
+      event.jobs.skipped,
+    )
+  };
+  let commit = &event.commit_hash[..event.commit_hash.len().min(12)];
   format!(
-    "{PR_COMMENT_MARKER}\n### {icon} Circus: {label}\n\n**{completed}/{} jobs \
-     complete** · {} succeeded · {} failed · {} running · {} queued · {} \
-     cancelled · {} skipped\n\nCommit `{}` · [View evaluation \
-     details]({detail_url})",
-    event.jobs.total,
-    event.jobs.succeeded,
-    event.jobs.failed,
-    event.jobs.running,
-    event.jobs.pending,
-    event.jobs.cancelled,
-    event.jobs.skipped,
-    &event.commit_hash[..event.commit_hash.len().min(12)],
+    "{PR_COMMENT_MARKER}\n### {icon} Circus: {label}\n\n{progress}Commit `{commit}` · \
+     [View evaluation details]({detail_url})",
   )
 }
 
@@ -818,15 +828,27 @@ mod pr_comment_tests {
     );
 
     event.evaluation_status = EvaluationStatus::Failed;
-    assert!(
-      render_pr_comment(&event, "https://circus.example/evaluation/abc")
-        .contains("Evaluation failed")
-    );
+    let body =
+      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+    assert!(body.contains("Evaluation failed"));
+    assert!(!body.contains("0/0 jobs"));
 
     event.evaluation_status = EvaluationStatus::TimedOut;
     assert!(
       render_pr_comment(&event, "https://circus.example/evaluation/abc")
         .contains("Evaluation timed out")
     );
+  }
+
+  #[test]
+  fn running_evaluation_reports_discovered_jobs() {
+    let mut event = event(JobSummary::from_counts_including_pending(&[
+      (circus_common::models::BuildStatus::Succeeded, 5),
+    ]));
+    event.evaluation_status = EvaluationStatus::Running;
+    let body =
+      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+    assert!(body.contains("5 jobs discovered"));
+    assert!(!body.contains("5/5 jobs complete"));
   }
 }
