@@ -8,4 +8,5 @@ pub mod metrics;
 pub mod misc;
 pub mod project;
 pub mod projects;
+pub mod simple;
 pub mod users;

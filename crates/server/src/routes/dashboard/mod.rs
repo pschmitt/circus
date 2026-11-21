@@ -43,6 +43,7 @@ pub fn router(live: TowerService) -> Router<AppState> {
     )
     .route("/account/unlink/{provider}", post(auth::account_unlink))
     .route("/", get_service(live.clone()))
+    .route("/simple", get_service(live.clone()))
     .route(
       "/projects",
       get_service(live.clone()).post(admin::project_create),

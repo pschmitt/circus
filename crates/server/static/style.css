@@ -178,6 +178,319 @@ pre {
   grid-template-columns: 250px minmax(0, 1fr);
 }
 
+/* Small public-facing build view for the build.brkn.lol vhost. */
+.app-shell:has(.simple-dashboard) {
+  display: block;
+}
+
+.app-shell:has(.simple-dashboard) > .sidebar {
+  display: none;
+}
+
+.app-shell:has(.simple-dashboard) .container,
+.app-shell:has(.simple-dashboard) > .shell-main > .footer {
+  padding: 0;
+}
+
+.app-shell:has(.simple-dashboard) > .shell-main > .footer {
+  display: none;
+}
+
+.simple-dashboard {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.simple-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 max(20px, calc((100vw - 900px) / 2));
+  border-bottom: 1px solid var(--border);
+}
+
+.simple-wordmark {
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: -0.03em;
+}
+
+.simple-header nav {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.simple-header form {
+  display: inline;
+}
+
+.simple-header button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.simple-content {
+  width: min(100% - 40px, 780px);
+  margin: 0 auto;
+  padding: 48px 0 36px;
+}
+
+.simple-title {
+  margin-bottom: 34px;
+}
+
+.simple-title h1 {
+  font-size: clamp(28px, 5vw, 38px);
+  line-height: 1.12;
+  letter-spacing: -0.045em;
+}
+
+.simple-title p {
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.simple-section {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.simple-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.simple-section-heading h2 {
+  font-size: 17px;
+  line-height: 24px;
+  letter-spacing: -0.02em;
+}
+
+.simple-section-heading > a,
+.simple-section-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-counts {
+  display: flex;
+  gap: clamp(20px, 7vw, 54px);
+  padding: 18px 0 14px;
+}
+
+.simple-counts > div {
+  display: grid;
+  gap: 2px;
+}
+
+.simple-counts strong {
+  font-size: 21px;
+  line-height: 26px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.simple-counts span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-build-list,
+.simple-effect-list {
+  list-style: none;
+}
+
+.simple-build-list li {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.simple-build-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.simple-build-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+}
+
+.simple-build-main > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simple-status,
+.simple-effect-state,
+.simple-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-queued);
+}
+
+.simple-status.running,
+.simple-effect-state.running {
+  background: var(--status-running);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-running) 16%, transparent);
+}
+
+.simple-status.succeeded,
+.simple-effect-state.success {
+  background: var(--status-success);
+}
+
+.simple-status.failed,
+.simple-effect-state.failed {
+  background: var(--status-failed);
+}
+
+.simple-status-label,
+.simple-effect-state-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-status-label.failed,
+.simple-effect-state-label.failed {
+  color: var(--status-failed);
+}
+
+.simple-empty {
+  padding: 18px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.simple-effect-list > li {
+  padding: 13px 0;
+  border-top: 1px solid var(--border);
+}
+
+.simple-effect-commit,
+.simple-effect-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.simple-effect-commit {
+  margin-bottom: 9px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-commit-label {
+  color: var(--text-subtle);
+}
+
+.simple-effect-commit code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+}
+
+.simple-effect-commit time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.simple-effect-row {
+  min-height: 26px;
+  padding-left: 1px;
+  font-size: 13px;
+}
+
+.simple-effect-state-label {
+  margin-left: auto;
+}
+
+.simple-footer {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 34px;
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.simple-footer a {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.simple-live-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--status-success);
+}
+
+.simple-dashboard :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+@media (max-width: 520px) {
+  .simple-header {
+    min-height: 54px;
+    padding: 0 16px;
+  }
+
+  .simple-content {
+    width: calc(100% - 32px);
+    padding: 34px 0 26px;
+  }
+
+  .simple-title {
+    margin-bottom: 27px;
+  }
+
+  .simple-build-list li {
+    grid-template-columns: 8px minmax(0, 1fr);
+    gap: 10px;
+    padding: 9px 0;
+  }
+
+  .simple-status-label {
+    grid-column: 2;
+    margin-top: -8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .simple-dashboard *,
+  .simple-dashboard *::before,
+  .simple-dashboard *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 .sidebar {
   position: sticky;
   top: 0;
