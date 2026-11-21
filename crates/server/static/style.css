@@ -358,13 +358,36 @@ pre {
 
 .simple-counts {
   display: flex;
-  gap: clamp(20px, 7vw, 54px);
+  gap: 8px;
   padding: 18px 0 14px;
 }
 
-.simple-counts > div {
+.simple-counts > a {
+  min-width: 0;
+  flex: 1;
   display: grid;
   gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-top: 2px solid currentColor;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.simple-counts > a:hover {
+  background: color-mix(in srgb, currentColor 6%, var(--surface));
+}
+
+.simple-count-card.running {
+  color: var(--status-running);
+}
+
+.simple-count-card.queued {
+  color: var(--status-queued);
+}
+
+.simple-count-card.failed {
+  color: var(--status-failed);
 }
 
 .simple-counts strong {
@@ -375,8 +398,12 @@ pre {
 }
 
 .simple-counts span {
-  color: var(--text-muted);
+  color: currentColor;
   font-size: 12px;
+}
+
+.simple-counts strong {
+  color: currentColor;
 }
 
 .simple-build-list,
@@ -573,6 +600,64 @@ pre {
   white-space: nowrap;
 }
 
+.simple-project-history {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 72px;
+  gap: 3px;
+  height: 20px;
+}
+
+.simple-history-point {
+  width: 4px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--status-queued);
+}
+
+.simple-history-point.completed,
+.simple-history-point.succeeded {
+  background: var(--status-success);
+}
+
+.simple-history-point.failed,
+.simple-history-point.timed-out {
+  background: var(--status-failed);
+}
+
+.simple-history-point.running {
+  background: var(--status-running);
+}
+
+.simple-history-point.pending,
+.simple-history-point.cancelled,
+.simple-history-point.no-builds {
+  background: var(--status-queued);
+}
+
+.simple-history-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.simple-results-summary {
+  margin-top: 7px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.simple-results-pagination {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 14px;
+}
+
+.simple-results-pagination a {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .simple-empty {
   padding: 18px 0;
   color: var(--text-muted);
@@ -732,6 +817,14 @@ pre {
     justify-content: flex-start;
     padding-left: 22px;
     flex-wrap: wrap;
+  }
+
+  .simple-counts {
+    gap: 6px;
+  }
+
+  .simple-counts > a {
+    padding: 7px 8px;
   }
 
   .simple-project-health time {

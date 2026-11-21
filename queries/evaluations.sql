@@ -1,4 +1,5 @@
 --: EvaluationRow(error_message?, inputs_hash?, pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, started_at?, source_scope?, superseded_by?, source_base_commit?, finished_at?, commit_subject?, attrs_done?, attrs_total?)
+--: ProjectEvaluationHistoryRow()
 
 --! create_with_kind (pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, source_scope?, source_base_commit?) : EvaluationRow
 INSERT INTO evaluations (
@@ -31,6 +32,51 @@ WHERE (:jobset_id::uuid IS NULL OR jobset_id = :jobset_id)
   AND (:include_hidden::boolean OR hidden = false)
 ORDER BY evaluation_time DESC
 LIMIT :limit OFFSET :offset;
+
+--! project_history (project_ids, include_hidden) : ProjectEvaluationHistoryRow
+WITH recent AS (
+  SELECT
+    j.project_id,
+    e.id AS evaluation_id,
+    e.status AS evaluation_status,
+    e.evaluation_time,
+    ROW_NUMBER() OVER (
+      PARTITION BY j.project_id
+      ORDER BY e.evaluation_time DESC, e.id DESC
+    ) AS rank
+  FROM evaluations e
+  JOIN jobsets j ON j.id = e.jobset_id
+  WHERE j.project_id = ANY(:project_ids)
+    AND (:include_hidden::boolean OR e.hidden = false)
+)
+SELECT
+  recent.project_id,
+  CASE
+    WHEN recent.evaluation_status IN ('failed', 'timed_out')
+      OR COUNT(*) FILTER (WHERE b.status IN (
+        'failed', 'dependency_failed', 'aborted', 'failed_with_output',
+        'timeout', 'cached_failure', 'unsupported_system', 'log_limit_exceeded',
+        'nar_size_limit_exceeded', 'non_deterministic', 'oom_killed'
+      )) > 0 THEN 'failed'
+    WHEN recent.evaluation_status = 'running'
+      OR COUNT(*) FILTER (WHERE b.status = 'running') > 0 THEN 'running'
+    WHEN recent.evaluation_status = 'pending'
+      OR COUNT(*) FILTER (WHERE b.status = 'pending') > 0 THEN 'pending'
+    WHEN recent.evaluation_status = 'completed'
+      AND COUNT(b.id) > 0
+      AND COUNT(*) FILTER (WHERE b.status = 'succeeded') = COUNT(b.id)
+      THEN 'succeeded'
+    WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) = 0
+      THEN 'no_builds'
+    ELSE 'cancelled'
+  END::text AS status,
+  recent.evaluation_time
+FROM recent
+LEFT JOIN builds b ON b.evaluation_id = recent.evaluation_id
+WHERE recent.rank <= 12
+GROUP BY recent.project_id, recent.evaluation_id,
+  recent.evaluation_status, recent.evaluation_time
+ORDER BY recent.project_id, recent.evaluation_time ASC;
 
 --! count_filtered_with_visibility (jobset_id?, status?)
 SELECT COUNT(*) FROM evaluations

@@ -36,6 +36,11 @@ pub struct ListFilteredWithVisibilityParams<T1: crate::StringSql> {
     pub offset: i64,
 }
 #[derive(Debug)]
+pub struct ProjectHistoryParams<T1: crate::ArraySql<Item = uuid::Uuid>> {
+    pub project_ids: T1,
+    pub include_hidden: bool,
+}
+#[derive(Debug)]
 pub struct CountFilteredWithVisibilityParams<T1: crate::StringSql> {
     pub jobset_id: Option<uuid::Uuid>,
     pub status: Option<T1>,
@@ -253,6 +258,32 @@ impl<'a> From<EvaluationRowBorrowed<'a>> for EvaluationRow {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
+pub struct ProjectEvaluationHistoryRow {
+    pub project_id: uuid::Uuid,
+    pub status: String,
+    pub evaluation_time: jiff::Timestamp,
+}
+pub struct ProjectEvaluationHistoryRowBorrowed<'a> {
+    pub project_id: uuid::Uuid,
+    pub status: &'a str,
+    pub evaluation_time: jiff::Timestamp,
+}
+impl<'a> From<ProjectEvaluationHistoryRowBorrowed<'a>> for ProjectEvaluationHistoryRow {
+    fn from(
+        ProjectEvaluationHistoryRowBorrowed {
+            project_id,
+            status,
+            evaluation_time,
+        }: ProjectEvaluationHistoryRowBorrowed<'a>,
+    ) -> Self {
+        Self {
+            project_id,
+            status: status.into(),
+            evaluation_time,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
 pub struct BuildContextRow {
     pub evaluation_id: uuid::Uuid,
     pub project_id: uuid::Uuid,
@@ -305,6 +336,75 @@ where
         mapper: fn(EvaluationRowBorrowed) -> R,
     ) -> EvaluationRowQuery<'c, 'a, 's, C, R, N> {
         EvaluationRowQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub async fn one(self) -> Result<T, tokio_postgres::Error> {
+        let row =
+            crate::client::async_::one(self.client, self.query, &self.params, self.cached).await?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub async fn all(self) -> Result<Vec<T>, tokio_postgres::Error> {
+        self.iter().await?.try_collect().await
+    }
+    pub async fn opt(self) -> Result<Option<T>, tokio_postgres::Error> {
+        let opt_row =
+            crate::client::async_::opt(self.client, self.query, &self.params, self.cached).await?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub async fn iter(
+        self,
+    ) -> Result<
+        impl futures::Stream<Item = Result<T, tokio_postgres::Error>> + 'c,
+        tokio_postgres::Error,
+    > {
+        let stream = crate::client::async_::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )
+        .await?;
+        let mapped = stream
+            .map(move |res| {
+                res.and_then(|row| {
+                    let extracted = (self.extractor)(&row)?;
+                    Ok((self.mapper)(extracted))
+                })
+            })
+            .into_stream();
+        Ok(mapped)
+    }
+}
+pub struct ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s tokio_postgres::Statement>,
+    extractor: fn(
+        &tokio_postgres::Row,
+    ) -> Result<ProjectEvaluationHistoryRowBorrowed, tokio_postgres::Error>,
+    mapper: fn(ProjectEvaluationHistoryRowBorrowed) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(ProjectEvaluationHistoryRowBorrowed) -> R,
+    ) -> ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C, R, N> {
+        ProjectEvaluationHistoryRowQuery {
             client: self.client,
             params: self.params,
             query: self.query,
@@ -1013,6 +1113,63 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>
             &params.limit,
             &params.offset,
         )
+    }
+}
+pub struct ProjectHistoryStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn project_history() -> ProjectHistoryStmt {
+    ProjectHistoryStmt(
+        "WITH recent AS ( SELECT j.project_id, e.id AS evaluation_id, e.status AS evaluation_status, e.evaluation_time, ROW_NUMBER() OVER ( PARTITION BY j.project_id ORDER BY e.evaluation_time DESC, e.id DESC ) AS rank FROM evaluations e JOIN jobsets j ON j.id = e.jobset_id WHERE j.project_id = ANY($1) AND ($2::boolean OR e.hidden = false) ) SELECT recent.project_id, CASE WHEN recent.evaluation_status IN ('failed', 'timed_out') OR COUNT(*) FILTER (WHERE b.status IN ( 'failed', 'dependency_failed', 'aborted', 'failed_with_output', 'timeout', 'cached_failure', 'unsupported_system', 'log_limit_exceeded', 'nar_size_limit_exceeded', 'non_deterministic', 'oom_killed' )) > 0 THEN 'failed' WHEN recent.evaluation_status = 'running' OR COUNT(*) FILTER (WHERE b.status = 'running') > 0 THEN 'running' WHEN recent.evaluation_status = 'pending' OR COUNT(*) FILTER (WHERE b.status = 'pending') > 0 THEN 'pending' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) > 0 AND COUNT(*) FILTER (WHERE b.status = 'succeeded') = COUNT(b.id) THEN 'succeeded' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) = 0 THEN 'no_builds' ELSE 'cancelled' END::text AS status, recent.evaluation_time FROM recent LEFT JOIN builds b ON b.evaluation_id = recent.evaluation_id WHERE recent.rank <= 12 GROUP BY recent.project_id, recent.evaluation_id, recent.evaluation_status, recent.evaluation_time ORDER BY recent.project_id, recent.evaluation_time ASC",
+        None,
+    )
+}
+impl ProjectHistoryStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient, T1: crate::ArraySql<Item = uuid::Uuid>>(
+        &'s self,
+        client: &'c C,
+        project_ids: &'a T1,
+        include_hidden: &'a bool,
+    ) -> ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C, ProjectEvaluationHistoryRow, 2> {
+        ProjectEvaluationHistoryRowQuery {
+            client,
+            params: [project_ids, include_hidden],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |
+                row: &tokio_postgres::Row,
+            | -> Result<ProjectEvaluationHistoryRowBorrowed, tokio_postgres::Error> {
+                Ok(ProjectEvaluationHistoryRowBorrowed {
+                    project_id: row.try_get(0)?,
+                    status: row.try_get(1)?,
+                    evaluation_time: row.try_get(2)?,
+                })
+            },
+            mapper: |it| ProjectEvaluationHistoryRow::from(it),
+        }
+    }
+}
+impl<'c, 'a, 's, C: GenericClient, T1: crate::ArraySql<Item = uuid::Uuid>>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        ProjectHistoryParams<T1>,
+        ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C, ProjectEvaluationHistoryRow, 2>,
+        C,
+    > for ProjectHistoryStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a ProjectHistoryParams<T1>,
+    ) -> ProjectEvaluationHistoryRowQuery<'c, 'a, 's, C, ProjectEvaluationHistoryRow, 2> {
+        self.bind(client, &params.project_ids, &params.include_hidden)
     }
 }
 pub struct CountFilteredWithVisibilityStmt(&'static str, Option<tokio_postgres::Statement>);

@@ -379,6 +379,46 @@ pub async fn list_filtered_with_visibility(
   rows.into_iter().map(Evaluation::try_from).collect()
 }
 
+/// One point in the recent evaluation history for a project.
+#[derive(Debug, Clone)]
+pub struct ProjectEvaluationHistory {
+  pub project_id: Uuid,
+  pub status:     String,
+}
+
+/// Fetch up to twelve visible recent evaluations for each project in one query.
+///
+/// # Errors
+///
+/// Returns error if the database query fails.
+pub async fn project_history(
+  pool: &PgPool,
+  project_ids: &[Uuid],
+  include_hidden: bool,
+) -> Result<Vec<ProjectEvaluationHistory>> {
+  if project_ids.is_empty() {
+    return Ok(Vec::new());
+  }
+
+  let client = pool.get().await?;
+  let rows = q::project_history()
+    .bind(&client, &project_ids, &include_hidden)
+    .all()
+    .await?;
+
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| {
+        ProjectEvaluationHistory {
+          project_id: row.project_id,
+          status:     row.status,
+        }
+      })
+      .collect(),
+  )
+}
+
 /// Count evaluations matching filter criteria.
 ///
 /// # Errors

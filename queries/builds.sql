@@ -261,6 +261,15 @@ WHERE j.project_id = :project_id;
 --! get_stats : (total_builds?, completed_builds?, failed_builds?, running_builds?, pending_builds?, avg_duration_seconds?)
 SELECT * FROM build_stats;
 
+--! get_stats_with_visibility (include_hidden) : (failed_builds?, running_builds?, pending_builds?)
+SELECT
+  COUNT(*) FILTER (WHERE b.status = 'failed')::bigint AS failed_builds,
+  COUNT(*) FILTER (WHERE b.status = 'running')::bigint AS running_builds,
+  COUNT(*) FILTER (WHERE b.status = 'pending')::bigint AS pending_builds
+FROM builds b
+JOIN evaluations e ON e.id = b.evaluation_id
+WHERE :include_hidden::boolean OR e.hidden = false;
+
 --! reset_orphaned
 UPDATE builds
 SET status = 'pending', started_at = NULL, effective_features = NULL
@@ -291,6 +300,26 @@ WHERE (:evaluation_id::uuid IS NULL OR evaluation_id = :evaluation_id)
   AND (:status::text IS NULL OR status = :status)
   AND (:system::text IS NULL OR system = :system)
   AND (:job_name::text IS NULL OR job_name ILIKE '%' || :job_name || '%');
+
+--! list_filtered_with_visibility (evaluation_id?, status?, system?, job_name?, include_hidden) : BuildRow
+SELECT b.* FROM builds b
+JOIN evaluations e ON e.id = b.evaluation_id
+WHERE (:evaluation_id::uuid IS NULL OR b.evaluation_id = :evaluation_id)
+  AND (:status::text IS NULL OR b.status = :status)
+  AND (:system::text IS NULL OR b.system = :system)
+  AND (:job_name::text IS NULL OR b.job_name ILIKE '%' || :job_name || '%')
+  AND (:include_hidden::boolean OR e.hidden = false)
+ORDER BY b.created_at DESC
+LIMIT :limit OFFSET :offset;
+
+--! count_filtered_with_visibility (evaluation_id?, status?, system?, job_name?, include_hidden)
+SELECT COUNT(*) FROM builds b
+JOIN evaluations e ON e.id = b.evaluation_id
+WHERE (:evaluation_id::uuid IS NULL OR b.evaluation_id = :evaluation_id)
+  AND (:status::text IS NULL OR b.status = :status)
+  AND (:system::text IS NULL OR b.system = :system)
+  AND (:job_name::text IS NULL OR b.job_name ILIKE '%' || :job_name || '%')
+  AND (:include_hidden::boolean OR e.hidden = false);
 
 --! get_cancelled_among
 SELECT requested.id

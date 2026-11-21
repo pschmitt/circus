@@ -1,12 +1,17 @@
 //! The compact, read-only build dashboard used by build.brkn.lol.
 
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use serde::Deserialize;
 use topcoat::{
   Result,
   context::{Cx, app_context},
-  router::{error::not_found, page, path_param},
+  router::{
+    error::{bad_request, not_found},
+    page,
+    path_param,
+    query_params,
+  },
   runtime::shard,
   view::{View, component, emit, live, view},
 };
@@ -20,6 +25,7 @@ use super::super::{
 use crate::{operator, state::AppState};
 
 const EFFECT_STATUS_DIR: &str = "/var/lib/circus-effects/public-status";
+const SIMPLE_BUILD_PAGE_SIZE: i64 = 50;
 
 #[derive(Deserialize)]
 struct EffectSnapshot {
@@ -58,6 +64,23 @@ struct BuildActivity {
   failed:  i64,
 }
 
+#[query_params(error = bad_request)]
+struct SimpleQuery {
+  status: Option<String>,
+  offset: Option<i64>,
+}
+
+struct SimpleProjectView {
+  summary:       ProjectSummaryView,
+  history:       Vec<EvaluationHistoryPoint>,
+  history_label: String,
+}
+
+struct EvaluationHistoryPoint {
+  status_text:  &'static str,
+  status_class: &'static str,
+}
+
 struct WorkerView {
   name:         String,
   systems:      String,
@@ -67,16 +90,25 @@ struct WorkerView {
   max_jobs:     i32,
 }
 
-#[page("/simple")]
+#[page("/dash")]
 pub(in crate::routes::dashboard) async fn simple_page(
   cx: &Cx,
 ) -> Result<impl View> {
   let viewer = viewer(cx, DashboardPage::Home).await?;
+  let query = query_params::<SimpleQuery>(cx)?;
+  let build_status = match query.status.as_deref() {
+    Some("running" | "pending" | "failed") => query.status.clone(),
+    Some(_) => {
+      return Err(bad_request("unsupported compact build status").into());
+    },
+    None => None,
+  };
+  let build_offset = query.offset.unwrap_or_default().clamp(0, 100_000);
   Ok(view! {
     document(title: "Builds", viewer: &viewer, topbar: false,
       <section class="simple-dashboard">
         <header class="simple-header">
-          <a class="simple-wordmark" href="/simple" aria-label="Build dashboard home">
+          <a class="simple-wordmark" href="/dash" aria-label="Build dashboard home">
             <img src="/static/favicon.svg" alt="">
           </a>
           <nav aria-label="Account">
@@ -88,42 +120,174 @@ pub(in crate::routes::dashboard) async fn simple_page(
           </nav>
         </header>
         <main class="simple-content">
-          <fieldset class="simple-tabs">
-            <legend class="sr-only">"Dashboard sections"</legend>
-            <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-activity" checked="checked">
-            <label for="tab-activity">"Activity"</label>
-            <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-repositories">
-            <label for="tab-repositories">"Repositories"</label>
-            <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-workers">
-            <label for="tab-workers">"Workers"</label>
-            <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-effects">
-            <label for="tab-effects">"Effects"</label>
-            <div class="simple-tab-panels">
-              <section class="simple-tab-panel" id="activity-panel" aria-label="Activity">
-                build_activity()
-              </section>
-              <section class="simple-tab-panel" id="repositories-panel" aria-label="Repositories">
-                repositories_activity()
-              </section>
-              <section class="simple-tab-panel" id="workers-panel" aria-label="Workers">
-                workers_activity()
-              </section>
-              <section class="simple-tab-panel" id="effects-panel" aria-label="Effects">
-                effects_activity()
-              </section>
-            </div>
-          </fieldset>
-          <footer class="simple-footer">
-            <span class="simple-live-dot" aria-hidden="true"></span>
-            "Updates automatically"
-          </footer>
+          if let Some(status) = build_status.as_deref() {
+            simple_build_results(status: status.to_owned(), offset: build_offset)
+          } else {
+            <fieldset class="simple-tabs">
+              <legend class="sr-only">"Dashboard sections"</legend>
+              <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-activity" checked="checked">
+              <label for="tab-activity">"Activity"</label>
+              <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-repositories">
+              <label for="tab-repositories">"Repositories"</label>
+              <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-workers">
+              <label for="tab-workers">"Workers"</label>
+              <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-effects">
+              <label for="tab-effects">"Effects"</label>
+              <div class="simple-tab-panels">
+                <section class="simple-tab-panel" id="activity-panel" aria-label="Activity">
+                  build_activity()
+                </section>
+                <section class="simple-tab-panel" id="repositories-panel" aria-label="Repositories">
+                  repositories_activity()
+                </section>
+                <section class="simple-tab-panel" id="workers-panel" aria-label="Workers">
+                  workers_activity()
+                </section>
+                <section class="simple-tab-panel" id="effects-panel" aria-label="Effects">
+                  effects_activity()
+                </section>
+              </div>
+            </fieldset>
+            <footer class="simple-footer">
+              <span class="simple-live-dot" aria-hidden="true"></span>
+              "Updates automatically"
+            </footer>
+          }
         </main>
       </section>
     )
   })
 }
 
-#[page("/simple/project/{simple_project_id}")]
+#[shard]
+async fn simple_build_results(
+  cx: &Cx,
+  status: String,
+  mut offset: i64,
+) -> Result<impl View> {
+  let viewer = shard_viewer(cx, DashboardPage::Home).await?;
+  let state = app_context::<AppState>(cx);
+  let mut changed = BuildsChanged::subscribe(cx);
+
+  Ok(live! {
+    loop {
+      let total = circus_common::repo::builds::count_filtered_with_visibility(
+        &state.pool,
+        None,
+        Some(&status),
+        None,
+        None,
+        viewer.is_admin,
+      )
+      .await
+      .unwrap_or_default();
+      offset = if total == 0 {
+        0
+      } else {
+        offset.min(total - 1) / SIMPLE_BUILD_PAGE_SIZE * SIMPLE_BUILD_PAGE_SIZE
+      };
+      let builds = circus_common::repo::builds::list_filtered_with_visibility(
+        &state.pool,
+        None,
+        Some(&status),
+        None,
+        None,
+        SIMPLE_BUILD_PAGE_SIZE,
+        offset,
+        viewer.is_admin,
+      )
+      .await
+      .unwrap_or_default()
+      .iter()
+      .map(BuildView::from)
+      .collect::<Vec<_>>();
+      let token = emit! {
+        simple_build_results_view(
+          status: &status,
+          offset: offset,
+          total: total,
+          builds: &builds,
+        )
+      }?;
+      tokio::select! {
+        wake = changed.next(cx, DashboardPage::Home, false) => {
+          match wake? {
+            None => break Ok(token),
+            Some(Wake::Changed(_current)) => {},
+            Some(Wake::Tick) => {},
+          }
+        },
+        () = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+          if !topcoat::runtime::connected(cx) {
+            break Ok(token);
+          }
+        },
+      }
+    }
+  })
+}
+
+#[component]
+async fn simple_build_results_view(
+  status: &str,
+  offset: i64,
+  total: i64,
+  builds: &[BuildView],
+) -> Result<impl View> {
+  let (heading, status_label) = match status {
+    "running" => ("Running builds", "running"),
+    "pending" => ("Queued builds", "queued"),
+    "failed" => ("Failed builds", "failed"),
+    _ => return Err(bad_request("unsupported compact build status").into()),
+  };
+  let page_end = offset + builds.len() as i64;
+
+  Ok(view! {
+    <section class="simple-section simple-build-results" aria-labelledby="simple-build-results-heading">
+      <div class="simple-section-heading">
+        <h1 id="simple-build-results-heading">(heading)</h1>
+        <a href="/dash">"Back to dashboard"</a>
+      </div>
+      if total > 0 {
+        <p class="simple-results-summary">
+          "Showing " (offset + 1) "–" (page_end) " of " (total) " " (status_label) " builds"
+        </p>
+      }
+      if total == 0 {
+        <p class="simple-empty">"No matching builds right now."</p>
+      } else {
+        <ul class="simple-build-list">
+          for build in builds {
+            <li>
+              <span class=(format!("simple-status {}", build.status_class)) aria-hidden="true"></span>
+              <div class="simple-build-main">
+                if build.has_log || matches!(build.status_text.as_str(), "Running" | "Pending") {
+                  <a href=(format!("/build/{}/log", build.id))><strong>(build.job_name.as_str())</strong></a>
+                } else {
+                  <strong>(build.job_name.as_str())</strong>
+                }
+                <span>(build.project_name.as_str()) " · " (build.system.as_str())</span>
+              </div>
+              <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
+            </li>
+          }
+        </ul>
+      }
+      if offset > 0 || page_end < total {
+        <nav class="simple-results-pagination" aria-label="Build result pages">
+          if offset > 0 {
+            <a href=(format!("/dash?status={status}&offset={}", (offset - SIMPLE_BUILD_PAGE_SIZE).max(0)))>"Previous"</a>
+          }
+          if page_end < total {
+            <a href=(format!("/dash?status={status}&offset={page_end}"))>"Next"</a>
+          }
+        </nav>
+      }
+    </section>
+  })
+}
+
+#[page("/dash/project/{simple_project_id}")]
 pub(in crate::routes::dashboard) async fn simple_project_page(
   cx: &Cx,
 ) -> Result<impl View> {
@@ -189,10 +353,10 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
     document(title: &project.name, viewer: &viewer, topbar: false,
       <section class="simple-dashboard">
         <header class="simple-header">
-          <a class="simple-wordmark" href="/simple" aria-label="Build dashboard home">
+          <a class="simple-wordmark" href="/dash" aria-label="Build dashboard home">
             <img src="/static/favicon.svg" alt="">
           </a>
-          <a href="/simple">"Dashboard"</a>
+          <a href="/dash">"Dashboard"</a>
         </header>
         <main class="simple-content">
           <h1 class="simple-project-title">(project.name.as_str())</h1>
@@ -242,10 +406,10 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
 pub(in crate::routes::dashboard) async fn build_activity(
   cx: &Cx,
 ) -> Result<impl View> {
-  shard_viewer(cx, DashboardPage::Home).await?;
   let state = app_context::<AppState>(cx);
   let mut changed = BuildsChanged::subscribe(cx);
-  let mut activity = load_builds(state).await;
+  let viewer = shard_viewer(cx, DashboardPage::Home).await?;
+  let mut activity = load_builds(state, viewer.is_admin).await;
 
   Ok(live! {
     loop {
@@ -255,7 +419,7 @@ pub(in crate::routes::dashboard) async fn build_activity(
           match wake? {
             None => break Ok(token),
             Some(Wake::Changed(_current)) => {
-              activity = load_builds(state).await;
+              activity = load_builds(state, _current.is_admin).await;
             },
             Some(Wake::Tick) => {},
           }
@@ -270,17 +434,29 @@ pub(in crate::routes::dashboard) async fn build_activity(
   })
 }
 
-async fn load_builds(state: &AppState) -> BuildActivity {
-  let stats = circus_common::repo::builds::get_stats(&state.pool)
-    .await
-    .unwrap_or_default();
-  let builds = operator::recent_builds(state)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .take(8)
-    .map(|build| BuildView::from(&build))
-    .collect();
+async fn load_builds(state: &AppState, include_hidden: bool) -> BuildActivity {
+  let stats = circus_common::repo::builds::get_stats_with_visibility(
+    &state.pool,
+    include_hidden,
+  )
+  .await
+  .unwrap_or_default();
+  let builds = circus_common::repo::builds::list_filtered_with_visibility(
+    &state.pool,
+    None,
+    None,
+    None,
+    None,
+    40,
+    0,
+    include_hidden,
+  )
+  .await
+  .unwrap_or_default()
+  .into_iter()
+  .take(8)
+  .map(|build| BuildView::from(&build))
+  .collect();
   BuildActivity {
     builds,
     running: stats.running_builds.unwrap_or_default(),
@@ -323,18 +499,71 @@ pub(in crate::routes::dashboard) async fn repositories_activity(
 async fn load_projects(
   state: &AppState,
   include_hidden: bool,
-) -> Vec<ProjectSummaryView> {
-  operator::projects_with_latest_status(state, include_hidden)
-    .await
-    .unwrap_or_default()
-    .iter()
-    .map(ProjectSummaryView::from)
+) -> Vec<SimpleProjectView> {
+  let mut projects: Vec<_> =
+    operator::projects_with_latest_status(state, include_hidden)
+      .await
+      .unwrap_or_default()
+      .iter()
+      .map(ProjectSummaryView::from)
+      .collect();
+  projects.sort_by_cached_key(|project| project.name.to_lowercase());
+
+  let project_ids: Vec<_> = projects.iter().map(|project| project.id).collect();
+  let histories = circus_common::repo::evaluations::project_history(
+    &state.pool,
+    &project_ids,
+    include_hidden,
+  )
+  .await
+  .unwrap_or_default();
+  let mut histories_by_project: HashMap<Uuid, Vec<EvaluationHistoryPoint>> =
+    HashMap::new();
+  for evaluation in histories {
+    let (status_text, status_class) = match evaluation.status.as_str() {
+      "failed" => ("Failed", "failed"),
+      "running" => ("Running", "running"),
+      "pending" => ("Queued", "pending"),
+      "succeeded" => ("Succeeded", "succeeded"),
+      "no_builds" => ("Evaluated, no builds", "no-builds"),
+      _ => ("Cancelled", "cancelled"),
+    };
+    histories_by_project
+      .entry(evaluation.project_id)
+      .or_default()
+      .push(EvaluationHistoryPoint {
+        status_text,
+        status_class,
+      });
+  }
+
+  projects
+    .into_iter()
+    .map(|summary| {
+      let history =
+        histories_by_project.remove(&summary.id).unwrap_or_default();
+      let history_label = if history.is_empty() {
+        "No recent evaluations".to_owned()
+      } else {
+        let labels = history
+          .iter()
+          .map(|point| point.status_text)
+          .collect::<Vec<_>>()
+          .join(", ");
+        format!("Recent evaluations, oldest to newest: {labels}")
+      };
+      SimpleProjectView {
+        summary,
+        history,
+        history_label,
+      }
+    })
     .collect()
 }
 
 #[component]
 async fn repositories_view(
-  projects: &[ProjectSummaryView],
+  projects: &[SimpleProjectView],
 ) -> Result<impl View> {
   Ok(view! {
     <section class="simple-section" aria-labelledby="repositories-heading">
@@ -349,23 +578,36 @@ async fn repositories_view(
           for project in projects {
             <li>
               <div class="simple-project-main">
-                <a href=(format!("/simple/project/{}", project.id))><strong>(project.name.as_str())</strong></a>
-                <span>(project.jobset_count) " jobsets · " (project.systems.as_str())</span>
+                <a href=(format!("/dash/project/{}", project.summary.id))><strong>(project.summary.name.as_str())</strong></a>
+                <span>(project.summary.jobset_count) " jobsets · " (project.summary.systems.as_str())</span>
               </div>
               <div class="simple-project-health">
-                if project.latest_running > 0 {
-                  <span class="simple-status-label running">"Building " (project.latest_running)</span>
+                if project.summary.latest_running > 0 {
+                  <span class="simple-status-label running">"Building " (project.summary.latest_running)</span>
                 }
-                if project.latest_queued > 0 {
-                  <span class="simple-status-label queued">"Queued " (project.latest_queued)</span>
+                if project.summary.latest_queued > 0 {
+                  <span class="simple-status-label queued">"Queued " (project.summary.latest_queued)</span>
                 }
-                if project.latest_succeeded > 0 {
-                  <span class="simple-status-label succeeded">"Succeeded " (project.latest_succeeded)</span>
+                if project.summary.latest_succeeded > 0 {
+                  <span class="simple-status-label succeeded">"Succeeded " (project.summary.latest_succeeded)</span>
                 }
-                if project.latest_failed > 0 {
-                  <span class="simple-status-label failed">"Failed " (project.latest_failed)</span>
+                if project.summary.latest_failed > 0 {
+                  <span class="simple-status-label failed">"Failed " (project.summary.latest_failed)</span>
                 }
-                <time>(project.last_eval_time.as_str())</time>
+                if project.history.is_empty() {
+                  <span class="simple-history-empty" aria-label=(project.history_label.as_str())>"No history"</span>
+                } else {
+                  <span class="simple-project-history" role="img" aria-label=(project.history_label.as_str())>
+                    for point in &project.history {
+                      <span
+                        class=(format!("simple-history-point {}", point.status_class))
+                        title=(point.status_text)
+                        aria-hidden="true"
+                      ></span>
+                    }
+                  </span>
+                }
+                <time>(project.summary.last_eval_time.as_str())</time>
               </div>
             </li>
           }
@@ -486,9 +728,15 @@ async fn build_activity_view(activity: &BuildActivity) -> Result<impl View> {
         <h2 id="builds-heading">"Build activity"</h2>
       </div>
       <div class="simple-counts" aria-label="Recent build counts">
-        <div><strong>(activity.running)</strong><span>"Running"</span></div>
-        <div><strong>(activity.queued)</strong><span>"Queued"</span></div>
-        <div><strong>(activity.failed)</strong><span>"Failed"</span></div>
+        <a class="simple-count-card running" href="/dash?status=running" aria-label=(format!("{} running builds", activity.running))>
+          <strong>(activity.running)</strong><span>"Running"</span>
+        </a>
+        <a class="simple-count-card queued" href="/dash?status=pending" aria-label=(format!("{} queued builds", activity.queued))>
+          <strong>(activity.queued)</strong><span>"Queued"</span>
+        </a>
+        <a class="simple-count-card failed" href="/dash?status=failed" aria-label=(format!("{} failed builds", activity.failed))>
+          <strong>(activity.failed)</strong><span>"Failed"</span>
+        </a>
       </div>
       if activity.builds.is_empty() {
         <p class="simple-empty">"No builds yet. New builds will appear here."</p>

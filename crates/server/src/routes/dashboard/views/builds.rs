@@ -1333,10 +1333,10 @@ pub(in crate::routes::dashboard) async fn build_log_page(
       if simple {
         <section class="simple-dashboard simple-log-page">
           <header class="simple-header">
-            <a class="simple-wordmark" href="/simple" aria-label="Build dashboard home">
+            <a class="simple-wordmark" href="/dash" aria-label="Build dashboard home">
               <img src="/static/favicon.svg" alt="">
             </a>
-            <a href="/simple" aria-label="Return to dashboard">"Dashboard"</a>
+            <a href="/dash" aria-label="Return to dashboard">"Dashboard"</a>
           </header>
           <main class="simple-content">
             if let Some(log) = log {

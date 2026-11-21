@@ -821,6 +821,30 @@ pub async fn get_stats(pool: &PgPool) -> Result<BuildStats> {
   }
 }
 
+/// Return compact dashboard build counts restricted to visible evaluations.
+///
+/// # Errors
+///
+/// Returns error if the database query fails.
+pub async fn get_stats_with_visibility(
+  pool: &PgPool,
+  include_hidden: bool,
+) -> Result<BuildStats> {
+  let client = pool.get().await?;
+  let row = q::get_stats_with_visibility()
+    .bind(&client, &include_hidden)
+    .one()
+    .await?;
+  Ok(BuildStats {
+    total_builds:         None,
+    completed_builds:     None,
+    failed_builds:        row.failed_builds,
+    running_builds:       row.running_builds,
+    pending_builds:       row.pending_builds,
+    avg_duration_seconds: None,
+  })
+}
+
 /// Reset builds that were left in 'running' state, excluding IDs that are
 /// known to still be active in the current runner process.
 ///
@@ -905,6 +929,67 @@ pub async fn count_filtered(
       .one()
       .await?,
   )
+}
+
+/// Count filtered builds while applying evaluation visibility.
+///
+/// # Errors
+///
+/// Returns error if the database query fails.
+pub async fn count_filtered_with_visibility(
+  pool: &PgPool,
+  evaluation_id: Option<Uuid>,
+  status: Option<&str>,
+  system: Option<&str>,
+  job_name: Option<&str>,
+  include_hidden: bool,
+) -> Result<i64> {
+  let client = pool.get().await?;
+  Ok(
+    q::count_filtered_with_visibility()
+      .bind(
+        &client,
+        &evaluation_id,
+        &status,
+        &system,
+        &job_name,
+        &include_hidden,
+      )
+      .one()
+      .await?,
+  )
+}
+
+/// List filtered builds while applying evaluation visibility.
+///
+/// # Errors
+///
+/// Returns error if the database query fails.
+pub async fn list_filtered_with_visibility(
+  pool: &PgPool,
+  evaluation_id: Option<Uuid>,
+  status: Option<&str>,
+  system: Option<&str>,
+  job_name: Option<&str>,
+  limit: i64,
+  offset: i64,
+  include_hidden: bool,
+) -> Result<Vec<Build>> {
+  let client = pool.get().await?;
+  let rows = q::list_filtered_with_visibility()
+    .bind(
+      &client,
+      &evaluation_id,
+      &status,
+      &system,
+      &job_name,
+      &include_hidden,
+      &limit,
+      &offset,
+    )
+    .all()
+    .await?;
+  rows.into_iter().map(Build::try_from).collect()
 }
 
 /// Return the subset of the given build IDs that were cancelled or deleted.

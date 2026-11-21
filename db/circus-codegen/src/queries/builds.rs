@@ -119,6 +119,32 @@ pub struct CountFilteredParams<T1: crate::StringSql, T2: crate::StringSql, T3: c
     pub system: Option<T2>,
     pub job_name: Option<T3>,
 }
+#[derive(Debug)]
+pub struct ListFilteredWithVisibilityParams<
+    T1: crate::StringSql,
+    T2: crate::StringSql,
+    T3: crate::StringSql,
+> {
+    pub evaluation_id: Option<uuid::Uuid>,
+    pub status: Option<T1>,
+    pub system: Option<T2>,
+    pub job_name: Option<T3>,
+    pub include_hidden: bool,
+    pub limit: i64,
+    pub offset: i64,
+}
+#[derive(Debug)]
+pub struct CountFilteredWithVisibilityParams<
+    T1: crate::StringSql,
+    T2: crate::StringSql,
+    T3: crate::StringSql,
+> {
+    pub evaluation_id: Option<uuid::Uuid>,
+    pub status: Option<T1>,
+    pub system: Option<T2>,
+    pub job_name: Option<T3>,
+    pub include_hidden: bool,
+}
 #[derive(Clone, Copy, Debug)]
 pub struct SetClosureSizeParams {
     pub closure_size: i64,
@@ -357,6 +383,12 @@ pub struct GetStats {
     pub running_builds: Option<i64>,
     pub pending_builds: Option<i64>,
     pub avg_duration_seconds: Option<f64>,
+}
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub struct GetStatsWithVisibility {
+    pub failed_builds: Option<i64>,
+    pub running_builds: Option<i64>,
+    pub pending_builds: Option<i64>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrokeIn {
@@ -864,6 +896,73 @@ where
 {
     pub fn map<R>(self, mapper: fn(GetStats) -> R) -> GetStatsQuery<'c, 'a, 's, C, R, N> {
         GetStatsQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub async fn one(self) -> Result<T, tokio_postgres::Error> {
+        let row =
+            crate::client::async_::one(self.client, self.query, &self.params, self.cached).await?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub async fn all(self) -> Result<Vec<T>, tokio_postgres::Error> {
+        self.iter().await?.try_collect().await
+    }
+    pub async fn opt(self) -> Result<Option<T>, tokio_postgres::Error> {
+        let opt_row =
+            crate::client::async_::opt(self.client, self.query, &self.params, self.cached).await?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub async fn iter(
+        self,
+    ) -> Result<
+        impl futures::Stream<Item = Result<T, tokio_postgres::Error>> + 'c,
+        tokio_postgres::Error,
+    > {
+        let stream = crate::client::async_::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )
+        .await?;
+        let mapped = stream
+            .map(move |res| {
+                res.and_then(|row| {
+                    let extracted = (self.extractor)(&row)?;
+                    Ok((self.mapper)(extracted))
+                })
+            })
+            .into_stream();
+        Ok(mapped)
+    }
+}
+pub struct GetStatsWithVisibilityQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s tokio_postgres::Statement>,
+    extractor: fn(&tokio_postgres::Row) -> Result<GetStatsWithVisibility, tokio_postgres::Error>,
+    mapper: fn(GetStatsWithVisibility) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> GetStatsWithVisibilityQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(GetStatsWithVisibility) -> R,
+    ) -> GetStatsWithVisibilityQuery<'c, 'a, 's, C, R, N> {
+        GetStatsWithVisibilityQuery {
             client: self.client,
             params: self.params,
             query: self.query,
@@ -3010,6 +3109,44 @@ impl GetStatsStmt {
         }
     }
 }
+pub struct GetStatsWithVisibilityStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn get_stats_with_visibility() -> GetStatsWithVisibilityStmt {
+    GetStatsWithVisibilityStmt(
+        "SELECT COUNT(*) FILTER (WHERE b.status = 'failed')::bigint AS failed_builds, COUNT(*) FILTER (WHERE b.status = 'running')::bigint AS running_builds, COUNT(*) FILTER (WHERE b.status = 'pending')::bigint AS pending_builds FROM builds b JOIN evaluations e ON e.id = b.evaluation_id WHERE $1::boolean OR e.hidden = false",
+        None,
+    )
+}
+impl GetStatsWithVisibilityStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c C,
+        include_hidden: &'a bool,
+    ) -> GetStatsWithVisibilityQuery<'c, 'a, 's, C, GetStatsWithVisibility, 1> {
+        GetStatsWithVisibilityQuery {
+            client,
+            params: [include_hidden],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |
+                row: &tokio_postgres::Row,
+            | -> Result<GetStatsWithVisibility, tokio_postgres::Error> {
+                Ok(GetStatsWithVisibility {
+                    failed_builds: row.try_get(0)?,
+                    running_builds: row.try_get(1)?,
+                    pending_builds: row.try_get(2)?,
+                })
+            },
+            mapper: |it| GetStatsWithVisibility::from(it),
+        }
+    }
+}
 pub struct ResetOrphanedStmt(&'static str, Option<tokio_postgres::Statement>);
 pub fn reset_orphaned() -> ResetOrphanedStmt {
     ResetOrphanedStmt(
@@ -3294,6 +3431,190 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql, T2: crate::StringSql, T
             &params.status,
             &params.system,
             &params.job_name,
+        )
+    }
+}
+pub struct ListFilteredWithVisibilityStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn list_filtered_with_visibility() -> ListFilteredWithVisibilityStmt {
+    ListFilteredWithVisibilityStmt(
+        "SELECT b.* FROM builds b JOIN evaluations e ON e.id = b.evaluation_id WHERE ($1::uuid IS NULL OR b.evaluation_id = $1) AND ($2::text IS NULL OR b.status = $2) AND ($3::text IS NULL OR b.system = $3) AND ($4::text IS NULL OR b.job_name ILIKE '%' || $4 || '%') AND ($5::boolean OR e.hidden = false) ORDER BY b.created_at DESC LIMIT $6 OFFSET $7",
+        None,
+    )
+}
+impl ListFilteredWithVisibilityStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<
+        'c,
+        'a,
+        's,
+        C: GenericClient,
+        T1: crate::StringSql,
+        T2: crate::StringSql,
+        T3: crate::StringSql,
+    >(
+        &'s self,
+        client: &'c C,
+        evaluation_id: &'a Option<uuid::Uuid>,
+        status: &'a Option<T1>,
+        system: &'a Option<T2>,
+        job_name: &'a Option<T3>,
+        include_hidden: &'a bool,
+        limit: &'a i64,
+        offset: &'a i64,
+    ) -> BuildRowQuery<'c, 'a, 's, C, BuildRow, 7> {
+        BuildRowQuery {
+            client,
+            params: [
+                evaluation_id,
+                status,
+                system,
+                job_name,
+                include_hidden,
+                limit,
+                offset,
+            ],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor:
+                |row: &tokio_postgres::Row| -> Result<BuildRowBorrowed, tokio_postgres::Error> {
+                    Ok(BuildRowBorrowed {
+                        id: row.try_get(0)?,
+                        evaluation_id: row.try_get(1)?,
+                        job_name: row.try_get(2)?,
+                        drv_path: row.try_get(3)?,
+                        status: row.try_get(4)?,
+                        started_at: row.try_get(5)?,
+                        completed_at: row.try_get(6)?,
+                        log_path: row.try_get(7)?,
+                        build_output_path: row.try_get(8)?,
+                        error_message: row.try_get(9)?,
+                        priority: row.try_get(10)?,
+                        retry_count: row.try_get(11)?,
+                        max_retries: row.try_get(12)?,
+                        notification_pending_since: row.try_get(13)?,
+                        outputs: row.try_get(14)?,
+                        is_aggregate: row.try_get(15)?,
+                        constituents: row.try_get(16)?,
+                        builder_id: row.try_get(17)?,
+                        signed: row.try_get(18)?,
+                        system: row.try_get(19)?,
+                        keep: row.try_get(20)?,
+                        created_at: row.try_get(21)?,
+                        is_fod: row.try_get(22)?,
+                        fod_hash: row.try_get(23)?,
+                        meta_description: row.try_get(24)?,
+                        meta_license: row.try_get(25)?,
+                        meta_homepage: row.try_get(26)?,
+                        meta_maintainers: row.try_get(27)?,
+                        required_features: row.try_get(28)?,
+                        agent_machine_id: row.try_get(29)?,
+                        started_notified_at: row.try_get(30)?,
+                        effective_features: row.try_get(31)?,
+                        agent_losses: row.try_get(32)?,
+                        closure_size: row.try_get(33)?,
+                    })
+                },
+            mapper: |it| BuildRow::from(it),
+        }
+    }
+}
+impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql, T2: crate::StringSql, T3: crate::StringSql>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        ListFilteredWithVisibilityParams<T1, T2, T3>,
+        BuildRowQuery<'c, 'a, 's, C, BuildRow, 7>,
+        C,
+    > for ListFilteredWithVisibilityStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a ListFilteredWithVisibilityParams<T1, T2, T3>,
+    ) -> BuildRowQuery<'c, 'a, 's, C, BuildRow, 7> {
+        self.bind(
+            client,
+            &params.evaluation_id,
+            &params.status,
+            &params.system,
+            &params.job_name,
+            &params.include_hidden,
+            &params.limit,
+            &params.offset,
+        )
+    }
+}
+pub struct CountFilteredWithVisibilityStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn count_filtered_with_visibility() -> CountFilteredWithVisibilityStmt {
+    CountFilteredWithVisibilityStmt(
+        "SELECT COUNT(*) FROM builds b JOIN evaluations e ON e.id = b.evaluation_id WHERE ($1::uuid IS NULL OR b.evaluation_id = $1) AND ($2::text IS NULL OR b.status = $2) AND ($3::text IS NULL OR b.system = $3) AND ($4::text IS NULL OR b.job_name ILIKE '%' || $4 || '%') AND ($5::boolean OR e.hidden = false)",
+        None,
+    )
+}
+impl CountFilteredWithVisibilityStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<
+        'c,
+        'a,
+        's,
+        C: GenericClient,
+        T1: crate::StringSql,
+        T2: crate::StringSql,
+        T3: crate::StringSql,
+    >(
+        &'s self,
+        client: &'c C,
+        evaluation_id: &'a Option<uuid::Uuid>,
+        status: &'a Option<T1>,
+        system: &'a Option<T2>,
+        job_name: &'a Option<T3>,
+        include_hidden: &'a bool,
+    ) -> I64Query<'c, 'a, 's, C, i64, 5> {
+        I64Query {
+            client,
+            params: [evaluation_id, status, system, job_name, include_hidden],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |row| Ok(row.try_get(0)?),
+            mapper: |it| it,
+        }
+    }
+}
+impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql, T2: crate::StringSql, T3: crate::StringSql>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        CountFilteredWithVisibilityParams<T1, T2, T3>,
+        I64Query<'c, 'a, 's, C, i64, 5>,
+        C,
+    > for CountFilteredWithVisibilityStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a CountFilteredWithVisibilityParams<T1, T2, T3>,
+    ) -> I64Query<'c, 'a, 's, C, i64, 5> {
+        self.bind(
+            client,
+            &params.evaluation_id,
+            &params.status,
+            &params.system,
+            &params.job_name,
+            &params.include_hidden,
         )
     }
 }

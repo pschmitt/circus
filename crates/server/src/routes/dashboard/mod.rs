@@ -49,9 +49,9 @@ pub fn router(
     )
     .route("/account/unlink/{provider}", post(auth::account_unlink))
     .route("/", get_service(live.clone()))
-    .route("/simple", get_service(build_live.clone()))
+    .route("/dash", get_service(build_live.clone()))
     .route(
-      "/simple/project/{simple_project_id}",
+      "/dash/project/{simple_project_id}",
       get_service(build_live.clone()),
     )
     .route(
