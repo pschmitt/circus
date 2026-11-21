@@ -44,9 +44,18 @@ struct EffectStatus {
 path_param!(simple_project_id: Uuid, error = not_found);
 
 struct ProjectJobsetView {
-  name:   String,
-  branch: String,
-  jobs:   Vec<ProjectJobView>,
+  name:          String,
+  branch:        String,
+  latest:        Option<ProjectEvaluationView>,
+  builds_commit: Option<String>,
+  build_count:   i64,
+  jobs:          Vec<ProjectJobView>,
+}
+
+struct ProjectEvaluationView {
+  commit:       String,
+  status_text:  &'static str,
+  status_class: &'static str,
 }
 
 struct ProjectJobView {
@@ -307,52 +316,95 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
   let jobsets =
     circus_common::repo::jobsets::list_all_for_project(&state.pool, project_id)
       .await?;
+  let client = state
+    .pool
+    .get()
+    .await
+    .map_err(circus_common::CiError::from)?;
   let mut jobset_views = Vec::with_capacity(jobsets.len());
   for jobset in jobsets {
-    let evaluations =
-      circus_common::repo::evaluations::list_filtered_with_visibility(
-        &state.pool,
-        Some(jobset.id),
-        None,
-        1,
-        0,
-        viewer.is_admin,
+    // Keep the branch's current state visible while a new evaluation has
+    // no builds. Use the most recent branch evaluation with real jobs for
+    // the log list, including superseded evaluations as history.
+    let summary = client
+      .query_one(
+        "SELECT current.commit_hash, current.status, recent.id, \
+         recent.commit_hash
+       FROM (VALUES ($1::uuid)) AS requested(jobset_id)
+       LEFT JOIN LATERAL (
+         SELECT e.commit_hash, e.status FROM evaluations e
+         WHERE e.jobset_id = requested.jobset_id AND e.pr_number IS NULL
+           AND ($2::boolean OR NOT e.hidden)
+         ORDER BY e.evaluation_time DESC, e.id DESC LIMIT 1
+       ) AS current ON true
+       LEFT JOIN LATERAL (
+         SELECT e.id, e.commit_hash FROM evaluations e
+         WHERE e.jobset_id = requested.jobset_id AND e.pr_number IS NULL
+           AND ($2::boolean OR NOT e.hidden)
+           AND EXISTS (
+             SELECT 1 FROM builds b WHERE b.evaluation_id = e.id
+               AND b.job_name NOT LIKE 'drv:%'
+           )
+         ORDER BY e.evaluation_time DESC, e.id DESC LIMIT 1
+       ) AS recent ON true",
+        &[&jobset.id, &viewer.is_admin],
       )
-      .await?;
+      .await
+      .map_err(circus_common::CiError::from)?;
+
+    let latest = summary.get::<_, Option<String>>(0).map(|commit| {
+      let status: Option<String> = summary.get(1);
+      let (status_text, status_class) = status
+        .as_deref()
+        .and_then(|status| {
+          status
+            .parse::<circus_common::models::EvaluationStatus>()
+            .ok()
+        })
+        .map_or(("Unknown", "unknown"), |status| status.badge());
+      ProjectEvaluationView {
+        commit,
+        status_text,
+        status_class,
+      }
+    });
     let mut jobs = Vec::new();
-    if let Some(evaluation) = evaluations.first() {
-      for status in [Some("running"), Some("pending"), None] {
-        let builds = circus_common::repo::builds::list_filtered(
-          &state.pool,
-          Some(evaluation.id),
-          status,
-          None,
-          None,
-          32,
-          0,
+    let mut build_count = 0;
+    if let Some(evaluation) = summary.get::<_, Option<Uuid>>(2) {
+      let rows = client
+        .query(
+          "SELECT id, job_name, system, status, count(*) OVER () FROM builds
+         WHERE evaluation_id = $1 AND job_name NOT LIKE 'drv:%'
+         ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 2
+           WHEN 'succeeded' THEN 3 WHEN 'cancelled' THEN 4 ELSE 1 END,
+           created_at DESC, id DESC LIMIT 32",
+          &[&evaluation],
         )
-        .await?;
-        jobs.extend(builds.into_iter().map(|build| {
-          let (status_text, status_class) = build.status.badge();
-          ProjectJobView {
-            id: build.id,
-            name: build.job_name,
-            system: build.system.unwrap_or_else(|| "unknown".to_owned()),
-            status_text,
-            status_class: if status_class == "pending" {
-              "queued"
-            } else {
-              status_class
-            },
-          }
-        }));
+        .await
+        .map_err(circus_common::CiError::from)?;
+      for row in rows {
+        let status: String = row.get(3);
+        let (status_text, status_class) = status
+          .parse::<circus_common::models::BuildStatus>()
+          .map_or(("Unknown", "unknown"), |status| status.badge());
+        build_count = row.get(4);
+        jobs.push(ProjectJobView {
+          id: row.get(0),
+          name: row.get(1),
+          system: row
+            .get::<_, Option<String>>(2)
+            .unwrap_or_else(|| "unknown".to_owned()),
+          status_text,
+          status_class,
+        });
       }
     }
-    let mut seen = std::collections::HashSet::new();
-    jobs.retain(|job| seen.insert(job.id));
     jobset_views.push(ProjectJobsetView {
       name: jobset.name,
       branch: jobset.branch.unwrap_or_else(|| "default branch".to_owned()),
+      latest,
+      builds_commit: summary.get(3),
+      build_count,
       jobs,
     });
   }
@@ -384,11 +436,26 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
                   <li>
                     <div class="simple-project-main">
                       <strong>(jobset.name.as_str())</strong>
-                      <span>(jobset.branch.as_str())</span>
+                      if jobset.branch != jobset.name {
+                        <span>(jobset.branch.as_str())</span>
+                      }
+                      if let Some(latest) = &jobset.latest {
+                        <div class="simple-jobset-evaluation">
+                          <span class=(format!("simple-status-label {}", latest.status_class))>(latest.status_text)</span>
+                          <code>(short_commit(&latest.commit))</code>
+                        </div>
+                      }
                     </div>
-                    if jobset.jobs.is_empty() {
-                      <span class="simple-status-label">"No builds in the latest evaluation"</span>
-                    } else {
+                    if let Some(commit) = &jobset.builds_commit {
+                      <div class="simple-jobset-build-heading">
+                        if jobset.latest.as_ref().is_some_and(|latest| latest.commit != *commit) {
+                          <strong>"Builds from the previous evaluation"</strong>
+                        } else {
+                          <strong>"Builds"</strong>
+                        }
+                        <code>(short_commit(commit))</code>
+                        <span>(jobset.jobs.len()) " of " (jobset.build_count)</span>
+                      </div>
                       <ul class="simple-project-jobs">
                         for job in &jobset.jobs {
                           <li>
@@ -402,6 +469,8 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
                           </li>
                         }
                       </ul>
+                    } else {
+                      <p class="simple-jobset-empty">"No builds have been queued for this branch yet."</p>
                     }
                   </li>
                 }

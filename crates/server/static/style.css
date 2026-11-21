@@ -688,6 +688,24 @@ pre {
   margin: 12px 14px;
 }
 
+.simple-jobset-evaluation,
+.simple-jobset-build-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.simple-jobset-build-heading {
+  padding: 8px 14px;
+  border-top: 1px solid var(--dash-line);
+  color: var(--dash-muted);
+  font-size: 12px;
+}
+
+.simple-jobset-build-heading > span { margin-inline-start: auto; }
+.simple-jobset-empty { margin: 12px 14px; color: var(--dash-muted); }
+
 .simple-project-jobs { border-top: 1px solid var(--dash-line); }
 .simple-project-jobs .simple-build-row { padding-inline-start: 22px; }
 
