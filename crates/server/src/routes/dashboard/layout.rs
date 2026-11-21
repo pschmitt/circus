@@ -8,6 +8,7 @@ use axum::{
 };
 use circus_common::models::User;
 use circus_config::PageAccessLevel;
+use data_encoding::HEXLOWER;
 use sha2::{Digest, Sha256};
 use topcoat::{
   Error,
@@ -27,8 +28,8 @@ use super::shared::{DashboardContext, DashboardPage, UiTemplateConfig};
 use crate::{auth_middleware::session_extensions, state::AppState};
 
 static STYLESHEET: LazyLock<String> = LazyLock::new(|| {
-  let hash = Sha256::digest(super::super::STYLE_CSS.as_bytes());
-  format!("/static/style.css?v={hash:x}")
+  let hash = HEXLOWER.encode(&Sha256::digest(super::super::STYLE_CSS.as_bytes()));
+  format!("/static/style.css?v={hash}")
 });
 
 struct NavLink {
