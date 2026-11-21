@@ -1,6 +1,6 @@
 //! The dashboard shell and access checks shared by every Topcoat page.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::LazyLock};
 
 use axum::{
   extract::ConnectInfo,
@@ -8,6 +8,7 @@ use axum::{
 };
 use circus_common::models::User;
 use circus_config::PageAccessLevel;
+use sha2::{Digest, Sha256};
 use topcoat::{
   Error,
   Result,
@@ -25,7 +26,10 @@ use topcoat::{
 use super::shared::{DashboardContext, DashboardPage, UiTemplateConfig};
 use crate::{auth_middleware::session_extensions, state::AppState};
 
-const STYLESHEET: &str = "/static/style.css?v=graphite-dashboard-v22";
+static STYLESHEET: LazyLock<String> = LazyLock::new(|| {
+  let hash = Sha256::digest(super::super::STYLE_CSS.as_bytes());
+  format!("/static/style.css?v={hash:x}")
+});
 
 struct NavLink {
   href:  &'static str,
@@ -277,7 +281,7 @@ async fn head(title: &str, ui: &UiTemplateConfig) -> Result<impl View> {
       if ui.has_favicon {
         <link rel="icon" href=(ui.favicon_url.as_str())>
       }
-      <link rel="stylesheet" href=(STYLESHEET)>
+      <link rel="stylesheet" href=(STYLESHEET.as_str())>
       <link rel="stylesheet" href="/static/theme.css">
       if ui.has_custom_css {
         <link rel="stylesheet" href="/static/custom.css">
