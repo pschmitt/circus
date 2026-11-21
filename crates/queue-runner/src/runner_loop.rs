@@ -89,11 +89,13 @@ async fn mark_build_done(
   log_path: Option<&str>,
   output_path: Option<&str>,
   error_msg: Option<&str>,
+  notifications_config: &NotificationsConfig,
+  notification_secret_key: Option<&str>,
 ) -> CiResult<()> {
   if let Err(e) = repo::builds::start(pool, build_id).await {
     tracing::warn!(build_id = %build_id, "Failed to start build before completion: {e}");
   }
-  repo::builds::complete(
+  let Some(updated_build) = repo::builds::complete(
     pool,
     build_id,
     status,
@@ -101,8 +103,26 @@ async fn mark_build_done(
     output_path,
     error_msg,
   )
-  .await
-  .map(|_| ())
+  .await?
+  else {
+    return Ok(());
+  };
+
+  if let Some((project, commit_hash)) =
+    get_project_for_build(pool, &updated_build).await
+  {
+    circus_notification::dispatch_build_finished(
+      Some(pool),
+      &updated_build,
+      &project,
+      &commit_hash,
+      notifications_config,
+      notification_secret_key,
+    )
+    .await;
+  }
+
+  Ok(())
 }
 
 /// Mark a build whose dependencies can never succeed as `dependency_failed`
@@ -452,6 +472,8 @@ pub async fn run(
                   None,
                   None,
                   None,
+                  &notifications_config,
+                  notification_secret_key.as_deref(),
                 )
                 .await
                 {
@@ -459,22 +481,6 @@ pub async fn run(
                   continue;
                 }
 
-                // Dispatch completion notification for aggregate build
-                if let Ok(updated_build) =
-                  repo::builds::get(&pool, build.id).await
-                  && let Some((project, commit_hash)) =
-                    get_project_for_build(&pool, &updated_build).await
-                {
-                  circus_notification::dispatch_build_finished(
-                    Some(&pool),
-                    &updated_build,
-                    &project,
-                    &commit_hash,
-                    &notifications_config,
-                    notification_secret_key.as_deref(),
-                  )
-                  .await;
-                }
                 continue;
               },
               Ok(false) => {
@@ -518,6 +524,8 @@ pub async fn run(
                   existing.log_path.as_deref(),
                   existing.build_output_path.as_deref(),
                   None,
+                  &notifications_config,
+                  notification_secret_key.as_deref(),
                 )
                 .await
                 {
@@ -576,6 +584,8 @@ pub async fn run(
                 None,
                 Some(&output_path),
                 None,
+                &notifications_config,
+                notification_secret_key.as_deref(),
               )
               .await
               {
@@ -617,6 +627,8 @@ pub async fn run(
               None,
               None,
               Some("Build skipped: derivation is in failed paths cache"),
+              &notifications_config,
+              notification_secret_key.as_deref(),
             )
             .await
             {
@@ -675,6 +687,8 @@ pub async fn run(
                   None,
                   None,
                   Some("No builder available for system/features"),
+                  &notifications_config,
+                  notification_secret_key.as_deref(),
                 )
                 .await
                 {
