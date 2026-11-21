@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use data_encoding::HEXLOWER;
 
 use super::{
+  github,
   rate_limit::{
     WEBHOOK_PROJECT_RATE_LIMIT,
     WEBHOOK_RATE_LIMIT_WINDOW,
@@ -218,4 +219,36 @@ fn webhook_rate_limiter_refills() {
   }
   assert!(!limiter.allow(project_id, now));
   assert!(limiter.allow(project_id, now + WEBHOOK_RATE_LIMIT_WINDOW));
+}
+
+#[test]
+fn github_app_repository_routing_requires_an_exact_repository_match() {
+  assert!(github::valid_github_full_name("pschmitt/Gadgetbridge"));
+  assert!(!github::valid_github_full_name(
+    "pschmitt/Gadgetbridge/extra"
+  ));
+  assert!(!github::valid_github_full_name("pschmitt/ Gadgetbridge"));
+
+  for repository_url in [
+    "https://github.com/pschmitt/Gadgetbridge.git",
+    "ssh://git@github.com/pschmitt/Gadgetbridge.git",
+    "git@github.com:pschmitt/Gadgetbridge.git",
+  ] {
+    assert!(github::github_repo_url_matches_full_name(
+      repository_url,
+      "pschmitt/Gadgetbridge"
+    ));
+  }
+
+  for repository_url in [
+    "https://github.com/other/Gadgetbridge",
+    "https://github.com/pschmitt/Gadgetbridge/fork",
+    "https://github.com.evil.test/pschmitt/Gadgetbridge",
+    "https://user@github.com/pschmitt/Gadgetbridge",
+  ] {
+    assert!(!github::github_repo_url_matches_full_name(
+      repository_url,
+      "pschmitt/Gadgetbridge"
+    ));
+  }
 }

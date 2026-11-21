@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
       "/api/v1/webhooks/{project_id}/github",
       post(github::handle_webhook),
     )
+    .route("/api/v1/webhooks/github", post(github::handle_app_webhook))
     .route(
       "/api/v1/webhooks/{project_id}/gitea",
       post(gitea::handle_webhook),
@@ -70,6 +71,16 @@ fn trace_webhook_repo(
     html_url,
     "webhook payload repository"
   );
+}
+
+fn rate_limit_response() -> (StatusCode, Json<WebhookResponse>) {
+  (
+    StatusCode::TOO_MANY_REQUESTS,
+    Json(WebhookResponse {
+      accepted: false,
+      message:  "Webhook rate limit exceeded".to_string(),
+    }),
+  )
 }
 
 /// A push ref classified by kind.

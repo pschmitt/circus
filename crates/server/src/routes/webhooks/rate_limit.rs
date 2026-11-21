@@ -5,16 +5,12 @@ use std::{
 
 use axum::{
   Extension,
-  Json,
   body::Body,
-  extract::{Path, Request},
-  http::StatusCode,
+  extract::Request,
   middleware::Next,
   response::{IntoResponse, Response},
 };
 use uuid::Uuid;
-
-use super::WebhookResponse;
 
 struct WebhookBucket {
   tokens:        f64,
@@ -50,13 +46,18 @@ impl WebhookBucket {
 
 pub(super) struct WebhookRateLimiter {
   buckets:      dashmap::DashMap<Uuid, WebhookBucket>,
+  app_bucket:   Mutex<WebhookBucket>,
   rps:          f64,
   burst:        f64,
+  app_rps:      f64,
+  app_burst:    f64,
   last_cleanup: Mutex<Instant>,
 }
 
 pub(super) const WEBHOOK_PROJECT_RATE_LIMIT: u32 = 10;
 pub(super) const WEBHOOK_RATE_LIMIT_WINDOW: Duration = Duration::from_mins(1);
+const WEBHOOK_APP_RATE_LIMIT: u32 = 600;
+const WEBHOOK_APP_BURST: u32 = 100;
 const WEBHOOK_BUCKET_TTL: Duration = Duration::from_mins(5);
 const WEBHOOK_BUCKET_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -68,9 +69,16 @@ impl WebhookRateLimiter {
   pub(super) fn new_at(now: Instant) -> Self {
     Self {
       buckets:      dashmap::DashMap::new(),
+      app_bucket:   Mutex::new(WebhookBucket::new(
+        f64::from(WEBHOOK_APP_BURST),
+        now,
+      )),
       rps:          f64::from(WEBHOOK_PROJECT_RATE_LIMIT)
         / WEBHOOK_RATE_LIMIT_WINDOW.as_secs_f64(),
       burst:        f64::from(WEBHOOK_PROJECT_RATE_LIMIT),
+      app_rps:      f64::from(WEBHOOK_APP_RATE_LIMIT)
+        / WEBHOOK_RATE_LIMIT_WINDOW.as_secs_f64(),
+      app_burst:    f64::from(WEBHOOK_APP_BURST),
       last_cleanup: Mutex::new(now),
     }
   }
@@ -84,6 +92,14 @@ impl WebhookRateLimiter {
       .or_insert_with(|| WebhookBucket::new(self.burst, now));
 
     bucket.refill(self.rps, self.burst, now);
+    bucket.try_consume()
+  }
+
+  pub(super) fn allow_app(&self, now: Instant) -> bool {
+    let Ok(mut bucket) = self.app_bucket.lock() else {
+      return false;
+    };
+    bucket.refill(self.app_rps, self.app_burst, now);
     bucket.try_consume()
   }
 
@@ -101,21 +117,60 @@ impl WebhookRateLimiter {
 }
 
 pub(super) async fn middleware(
-  Path(project_id): Path<Uuid>,
   Extension(limiter): Extension<Arc<WebhookRateLimiter>>,
   request: Request<Body>,
   next: Next,
 ) -> Response {
-  if !limiter.allow(project_id, Instant::now()) {
-    return (
-      StatusCode::TOO_MANY_REQUESTS,
-      Json(WebhookResponse {
-        accepted: false,
-        message:  "Webhook rate limit exceeded".to_string(),
-      }),
-    )
-      .into_response();
+  if let Some(project_id) = project_id_from_path(request.uri().path())
+    && !limiter.allow(project_id, Instant::now())
+  {
+    return super::rate_limit_response().into_response();
   }
 
   next.run(request).await
+}
+
+fn project_id_from_path(path: &str) -> Option<Uuid> {
+  let mut segments = path.split('/');
+  if segments.next()? != ""
+    || segments.next()? != "api"
+    || segments.next()? != "v1"
+    || segments.next()? != "webhooks"
+  {
+    return None;
+  }
+  let candidate = segments.next()?;
+  if candidate == "github" {
+    return None;
+  }
+  Uuid::parse_str(candidate).ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn project_id_is_read_only_from_project_scoped_paths() {
+    let id = Uuid::new_v4();
+    assert_eq!(
+      project_id_from_path(&format!("/api/v1/webhooks/{id}/github")),
+      Some(id)
+    );
+    assert_eq!(project_id_from_path("/api/v1/webhooks/github"), None);
+    assert_eq!(
+      project_id_from_path("/api/v1/webhooks/not-a-uuid/github"),
+      None
+    );
+  }
+
+  #[test]
+  fn generic_app_bucket_has_its_own_limit() {
+    let now = Instant::now();
+    let limiter = WebhookRateLimiter::new_at(now);
+    for _ in 0..WEBHOOK_APP_BURST {
+      assert!(limiter.allow_app(now));
+    }
+    assert!(!limiter.allow_app(now));
+  }
 }

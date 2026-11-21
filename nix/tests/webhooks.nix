@@ -96,7 +96,7 @@ testers.runNixOSTest {
 
         # Send push event (signature would normally be verified but we're testing)
         # We need to compute HMAC-SHA256 signature
-        payload = '{"ref":"refs/heads/main","after":"abc123def456789012345678901234567890abcd"}'
+        payload = '{"ref":"refs/heads/main","after":"abc123def456789012345678901234567890abcd","repository":{"full_name":"test/webhook-repo"}}'
 
         import hmac
         sig = hmac.new(b"test-secret", payload.encode(), hashlib.sha256).hexdigest()
@@ -127,7 +127,7 @@ testers.runNixOSTest {
         assert result.strip() == "false", f"Expected accepted=false for invalid sig, got {result.strip()}"
 
     with subtest("GitHub push webhook skips branch deletion"):
-        deletion_payload = '{"after": "0000000000000000000000000000000000000000"}'
+        deletion_payload = '{"after": "0000000000000000000000000000000000000000", "repository": {"full_name": "test/webhook-repo"}}'
         deletion_sig = hmac.new(b"test-secret", deletion_payload.encode(), hashlib.sha256).hexdigest()
 
         result = machine.succeed(
@@ -141,6 +141,98 @@ testers.runNixOSTest {
         assert "deletion" in result.lower() or "skip" in result.lower(), \
             f"Expected deletion event to be skipped, got: {result}"
 
+    with subtest("GitHub App webhook rejects a repository mismatch without enqueueing"):
+        count_before = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations\" -t"
+        ).strip()
+        payload = json.dumps({
+            "ref": "refs/heads/main",
+            "after": "deadbeef1234567890abcdef1234567890abcdef",
+            "repository": {"full_name": "test/another-repo"}
+        })
+        sig = hmac.new(b"test-secret", payload.encode(), hashlib.sha256).hexdigest()
+        code = machine.succeed(
+            "curl -s -o /dev/null -w '%{http_code}' "
+            "-X POST http://127.0.0.1:3000/api/v1/webhooks/github "
+            "-H 'Content-Type: application/json' "
+            "-H 'X-GitHub-Event: push' "
+            f"-H 'X-Hub-Signature-256: sha256={sig}' "
+            f"-d '{payload}'"
+        )
+        assert code.strip() == "404", f"Expected 404 for an unconfigured repository, got {code.strip()}"
+
+        count_after = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations\" -t"
+        ).strip()
+        assert count_after == count_before, \
+            f"Mismatched repository enqueued an evaluation: before={count_before}, after={count_after}"
+
+    with subtest("GitHub App webhook verifies the matched project's HMAC before enqueueing"):
+        count_before = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations\" -t"
+        ).strip()
+        payload = json.dumps({
+            "ref": "refs/heads/main",
+            "after": "abcdef0123456789abcdef0123456789abcdef01",
+            "repository": {"full_name": "test/webhook-repo"}
+        })
+        code = machine.succeed(
+            "curl -s -o /dev/null -w '%{http_code}' "
+            "-X POST http://127.0.0.1:3000/api/v1/webhooks/github "
+            "-H 'Content-Type: application/json' "
+            "-H 'X-GitHub-Event: push' "
+            "-H 'X-Hub-Signature-256: sha256=invalidsig' "
+            f"-d '{payload}'"
+        )
+        assert code.strip() == "401", f"Expected 401 for an invalid App signature, got {code.strip()}"
+        count_after = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations\" -t"
+        ).strip()
+        assert count_after == count_before, \
+            f"Invalid App signature enqueued an evaluation: before={count_before}, after={count_after}"
+
+        sig = hmac.new(b"test-secret", payload.encode(), hashlib.sha256).hexdigest()
+        machine.succeed(
+            "curl -sf -X POST http://127.0.0.1:3000/api/v1/webhooks/github "
+            "-H 'Content-Type: application/json' "
+            "-H 'X-GitHub-Event: push' "
+            f"-H 'X-Hub-Signature-256: sha256={sig}' "
+            f"-d '{payload}'"
+        )
+        count_after = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations\" -t"
+        ).strip()
+        assert int(count_after) > int(count_before), \
+            f"Expected valid App push to enqueue an evaluation: before={count_before}, after={count_after}"
+
+    with subtest("GitHub App webhook routes pull requests to the matched project"):
+        count_before = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations WHERE pr_number IS NOT NULL\" -t"
+        ).strip()
+        payload = json.dumps({
+            "action": "opened",
+            "number": 43,
+            "repository": {"full_name": "test/webhook-repo"},
+            "pull_request": {
+                "head": {"sha": "abcdef0123456789abcdef0123456789abcdef02", "ref": "app-branch"},
+                "base": {"sha": "base456", "ref": "main"},
+                "draft": False
+            }
+        })
+        sig = hmac.new(b"test-secret", payload.encode(), hashlib.sha256).hexdigest()
+        machine.succeed(
+            "curl -sf -X POST http://127.0.0.1:3000/api/v1/webhooks/github "
+            "-H 'Content-Type: application/json' "
+            "-H 'X-GitHub-Event: pull_request' "
+            f"-H 'X-Hub-Signature-256: sha256={sig}' "
+            f"-d '{payload}'"
+        )
+        count_after = machine.succeed(
+            "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations WHERE pr_number IS NOT NULL\" -t"
+        ).strip()
+        assert int(count_after) > int(count_before), \
+            f"Expected valid App PR to enqueue an evaluation: before={count_before}, after={count_after}"
+
     with subtest("GitHub pull_request webhook triggers evaluation with PR metadata"):
         count_before = machine.succeed(
             "setpriv --reuid=circus --regid=circus --init-groups psql -U circus -d circus -c \"SELECT COUNT(*) FROM evaluations WHERE pr_number IS NOT NULL\" -t"
@@ -149,6 +241,7 @@ testers.runNixOSTest {
         payload = json.dumps({
             "action": "opened",
             "number": 42,
+            "repository": {"full_name": "test/webhook-repo"},
             "pull_request": {
                 "head": {"sha": "pr123abc456def789012345678901234567890ab", "ref": "feature-branch"},
                 "base": {"sha": "base456", "ref": "main"},
@@ -183,6 +276,7 @@ testers.runNixOSTest {
         payload = json.dumps({
             "action": "opened",
             "number": 99,
+            "repository": {"full_name": "test/webhook-repo"},
             "pull_request": {
                 "head": {"sha": "draft123", "ref": "draft-branch"},
                 "base": {"sha": "base456", "ref": "main"},

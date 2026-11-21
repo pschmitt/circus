@@ -2186,6 +2186,32 @@
         }
       }
     },
+    "/webhooks/github": {
+      "post": {
+        "summary": "GitHub App webhook receiver",
+        "description": "Routes by the exact repository.full_name in the payload and verifies that project's GitHub webhook secret.",
+        "responses": {
+          "200": {
+            "description": "Webhook accepted or ignored"
+          },
+          "400": {
+            "description": "Invalid GitHub payload"
+          },
+          "401": {
+            "description": "Invalid signature"
+          },
+          "404": {
+            "description": "No matching project or GitHub webhook configured"
+          },
+          "409": {
+            "description": "Multiple projects match the repository"
+          },
+          "429": {
+            "description": "Webhook rate limit exceeded"
+          }
+        }
+      }
+    },
     "/webhooks/{project_id}/forgejo": {
       "post": {
         "summary": "Forgejo webhook receiver",

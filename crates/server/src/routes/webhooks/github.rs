@@ -1,4 +1,7 @@
+use std::{sync::Arc, time::Instant};
+
 use axum::{
+  Extension,
   Json,
   body::Bytes,
   extract::{Path, State},
@@ -6,6 +9,7 @@ use axum::{
 };
 use circus_common::{models::ForgeType, repo};
 use serde::Deserialize;
+use url::Url;
 use uuid::Uuid;
 
 use super::{
@@ -42,8 +46,14 @@ struct GithubPushPayload {
 
 #[derive(Debug, Deserialize)]
 struct GithubRepo {
+  full_name: Option<String>,
   clone_url: Option<String>,
   html_url:  Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAppWebhookPayload {
+  repository: Option<GithubRepo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +84,152 @@ pub(super) async fn handle_webhook(
   headers: HeaderMap,
   body: Bytes,
 ) -> Result<(StatusCode, Json<WebhookResponse>), ApiError> {
+  handle_project_webhook(state, project_id, headers, &body).await
+}
+
+pub(super) async fn handle_app_webhook(
+  State(state): State<AppState>,
+  Extension(limiter): Extension<Arc<super::rate_limit::WebhookRateLimiter>>,
+  headers: HeaderMap,
+  body: Bytes,
+) -> Result<(StatusCode, Json<WebhookResponse>), ApiError> {
+  if !limiter.allow_app(Instant::now()) {
+    return Ok(super::rate_limit_response());
+  }
+
+  let event_type = header_value(&headers, EVENT_HEADER);
+  if !matches!(event_type, "push" | "pull_request") {
+    return Ok(ignored_event_response(event_type));
+  }
+
+  let payload: GithubAppWebhookPayload = serde_json::from_slice(&body)
+    .map_err(|e| {
+      ApiError(circus_common::CiError::Validation(format!(
+        "Invalid GitHub payload: {e}"
+      )))
+    })?;
+  let Some(full_name) = payload
+    .repository
+    .and_then(|repository| repository.full_name)
+  else {
+    return Err(ApiError(circus_common::CiError::Validation(
+      "GitHub payload is missing repository.full_name".to_string(),
+    )));
+  };
+
+  let Some(project_id) =
+    find_project_for_github_repo(&state, &full_name).await?
+  else {
+    return Ok(webhook_not_configured(DISPLAY_NAME));
+  };
+  if !limiter.allow(project_id, Instant::now()) {
+    return Ok(super::rate_limit_response());
+  }
+
+  handle_project_webhook(state, project_id, headers, &body).await
+}
+
+async fn find_project_for_github_repo(
+  state: &AppState,
+  full_name: &str,
+) -> Result<Option<Uuid>, ApiError> {
+  if !valid_github_full_name(full_name) {
+    return Ok(None);
+  }
+
+  const PAGE_SIZE: i64 = 100;
+  let count = repo::projects::count(&state.pool).await?;
+  let mut offset = 0;
+  let mut found = None;
+  while offset < count {
+    let projects = repo::projects::list(&state.pool, PAGE_SIZE, offset).await?;
+    if projects.is_empty() {
+      break;
+    }
+
+    for project in projects {
+      if !github_repo_url_matches_full_name(&project.repository_url, full_name)
+      {
+        continue;
+      }
+      if found.replace(project.id).is_some() {
+        return Err(ApiError(circus_common::CiError::Conflict(
+          "Multiple Circus projects match this GitHub repository".to_string(),
+        )));
+      }
+    }
+    offset += PAGE_SIZE;
+  }
+
+  Ok(found)
+}
+
+pub(super) fn valid_github_full_name(full_name: &str) -> bool {
+  let Some((owner, repository)) = full_name.split_once('/') else {
+    return false;
+  };
+  let valid_segment = |segment: &str| {
+    !segment.is_empty()
+      && !matches!(segment, "." | "..")
+      && segment.chars().all(|character| {
+        !character.is_whitespace()
+          && !character.is_control()
+          && !"/?#:\\".contains(character)
+      })
+  };
+  valid_segment(owner) && valid_segment(repository)
+}
+
+pub(super) fn github_repo_url_matches_full_name(
+  repository_url: &str,
+  full_name: &str,
+) -> bool {
+  let path = if let Some(path) = repository_url.strip_prefix("git@github.com:")
+  {
+    path
+  } else {
+    let Ok(url) = Url::parse(repository_url) else {
+      return false;
+    };
+    if !url
+      .host_str()
+      .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+      || url.query().is_some()
+      || url.fragment().is_some()
+    {
+      return false;
+    }
+    match url.scheme() {
+      "https" if url.username().is_empty() && url.password().is_none() => {},
+      "ssh" if url.username() == "git" && url.password().is_none() => {},
+      _ => return false,
+    }
+    if url.port().is_some() {
+      return false;
+    }
+    let Some(path) = url.path().strip_prefix('/') else {
+      return false;
+    };
+    path
+  };
+
+  let path = path.strip_suffix('/').unwrap_or(path);
+  let Some((owner, repository)) = path.split_once('/') else {
+    return false;
+  };
+  let repository = repository.strip_suffix(".git").unwrap_or(repository);
+  !owner.is_empty()
+    && !repository.is_empty()
+    && !repository.contains('/')
+    && format!("{owner}/{repository}").eq_ignore_ascii_case(full_name)
+}
+
+async fn handle_project_webhook(
+  state: AppState,
+  project_id: Uuid,
+  headers: HeaderMap,
+  body: &[u8],
+) -> Result<(StatusCode, Json<WebhookResponse>), ApiError> {
   let webhook_config = repo::webhook_configs::get_by_project_and_forge(
     &state.pool,
     project_id,
@@ -95,20 +251,55 @@ pub(super) async fn handle_webhook(
   }
 
   let event_type = header_value(&headers, EVENT_HEADER);
+  if matches!(event_type, "push" | "pull_request")
+    && !payload_repository_matches_project(&state, project_id, body).await?
+  {
+    return Ok(webhook_not_configured(DISPLAY_NAME));
+  }
 
   match event_type {
-    "push" => handle_push(state, project_id, &body).await,
-    "pull_request" => handle_pull_request(state, project_id, &body).await,
-    _ => {
-      Ok((
-        StatusCode::OK,
-        Json(WebhookResponse {
-          accepted: true,
-          message:  format!("Ignored GitHub event: {event_type}"),
-        }),
-      ))
-    },
+    "push" => handle_push(state, project_id, body).await,
+    "pull_request" => handle_pull_request(state, project_id, body).await,
+    _ => Ok(ignored_event_response(event_type)),
   }
+}
+
+async fn payload_repository_matches_project(
+  state: &AppState,
+  project_id: Uuid,
+  body: &[u8],
+) -> Result<bool, ApiError> {
+  let payload: GithubAppWebhookPayload =
+    serde_json::from_slice(body).map_err(|e| {
+      ApiError(circus_common::CiError::Validation(format!(
+        "Invalid GitHub payload: {e}"
+      )))
+    })?;
+  let Some(full_name) = payload
+    .repository
+    .and_then(|repository| repository.full_name)
+  else {
+    // Keep accepting older project-scoped integrations whose payloads omitted
+    // repository metadata. GitHub App events include full_name and are checked.
+    return Ok(true);
+  };
+  let project = repo::projects::get(&state.pool, project_id).await?;
+  Ok(github_repo_url_matches_full_name(
+    &project.repository_url,
+    &full_name,
+  ))
+}
+
+fn ignored_event_response(
+  event_type: &str,
+) -> (StatusCode, Json<WebhookResponse>) {
+  (
+    StatusCode::OK,
+    Json(WebhookResponse {
+      accepted: true,
+      message:  format!("Ignored GitHub event: {event_type}"),
+    }),
+  )
 }
 
 async fn handle_push(

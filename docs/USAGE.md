@@ -816,7 +816,14 @@ POST /api/v1/webhooks/{project_id}/github
 POST /api/v1/webhooks/{project_id}/gitlab
 POST /api/v1/webhooks/{project_id}/gitea
 POST /api/v1/webhooks/{project_id}/forgejo
+POST /api/v1/webhooks/github
 ```
+
+The GitHub App webhook endpoint routes push and pull-request events by an
+exact match between the payload's `repository.full_name` and one configured
+GitHub project repository. It verifies the matching project's GitHub webhook
+secret before creating evaluations. The project-scoped GitHub endpoint remains
+available for existing integrations.
 
 Webhook configs are managed per project:
 
