@@ -18,7 +18,6 @@ use crate::{
 
 pub struct Autoscaler {
   cfg:            EphemeralPoolConfig,
-  token:          String,
   http:           reqwest::Client,
   pool:           PgPool,
   agent_pool:     Arc<AgentPool>,
@@ -78,11 +77,10 @@ impl Autoscaler {
     agent_pool: Arc<AgentPool>,
     shutdown_token: CancellationToken,
   ) -> misstep::Result<Self> {
-    let token = load_token(&cfg.github_actions).await?;
+    load_token(&cfg.github_actions).await?;
     let http = circus_http::api().build()?;
     Ok(Self {
       cfg,
-      token,
       http,
       pool,
       agent_pool,
@@ -338,6 +336,7 @@ impl Autoscaler {
 
   async fn dispatch_workflow(&self) -> misstep::Result<()> {
     let gha = &self.cfg.github_actions;
+    let token = load_token(gha).await?;
     let (owner, repo) = gha
       .workflow_repository
       .split_once('/')
@@ -366,7 +365,7 @@ impl Autoscaler {
       .post(url)
       .header(reqwest::header::ACCEPT, "application/vnd.github+json")
       .header("X-GitHub-Api-Version", circus_http::GITHUB_API_VERSION)
-      .bearer_auth(&self.token)
+      .bearer_auth(token)
       .json(&body)
       .send_checked()
       .await
@@ -441,7 +440,6 @@ mod tests {
         inflight_ttl_secs: 1,
         ..EphemeralPoolConfig::default()
       },
-      token:          "token".into(),
       http:           test_http_client(),
       pool:           circus_common::build_pool(
         "postgres://localhost/circus",
@@ -486,7 +484,6 @@ mod tests {
         scale_up_cooldown_secs: 30,
         ..EphemeralPoolConfig::default()
       },
-      token:          "token".into(),
       http:           test_http_client(),
       pool:           circus_common::build_pool(
         "postgres://localhost/circus",
