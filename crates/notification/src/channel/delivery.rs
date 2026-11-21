@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use circus_common::models::{BuildStatus, EvaluationStatus};
 use circus_config::EmailConfig;
 use circus_http::{RequestExt as _, ResponseExt as _, guard::resolve_public};
 use circus_logs::ErrorChain;
@@ -12,7 +15,7 @@ use lettre::{
     client::{Tls, TlsParameters},
   },
 };
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use tracing::{info, warn};
 
 use super::{
@@ -34,6 +37,309 @@ use crate::{
   parse_github_repo,
   parse_gitlab_project,
 };
+
+const PR_COMMENT_MARKER: &str = "<!-- circus-pr-status -->";
+const PR_COMMENT_AUTHOR: &str = "circus-pschmitt[bot]";
+
+#[derive(serde::Deserialize)]
+struct PullRequestHead {
+  head: PullRequestRef,
+}
+
+#[derive(serde::Deserialize)]
+struct PullRequestRef {
+  sha: String,
+}
+
+#[derive(serde::Deserialize)]
+struct IssueComment {
+  id:   u64,
+  body: Option<String>,
+  user: Option<CommentAuthor>,
+}
+
+#[derive(serde::Deserialize)]
+struct CommentAuthor {
+  login: String,
+}
+
+/// Upsert Circus's single status comment for a pull request. A transaction
+/// advisory lock serializes deliveries across Circus processes sharing DB.
+pub async fn upsert_github_pr_comment(
+  pool: &circus_common::PgPool,
+  token: &str,
+  circus_base_url: &str,
+  event: &EvaluationEvent,
+) -> Result<(), String> {
+  let number = event
+    .pr_number
+    .filter(|number| *number > 0)
+    .ok_or_else(|| "Evaluation has no valid pull request number".to_owned())?;
+  let (owner, repo) =
+    parse_github_repo(&event.project_url).ok_or_else(|| {
+      format!("Cannot parse GitHub repo from {}", event.project_url)
+    })?;
+  let lock_key = format!("{owner}/{repo}#{number}");
+  let mut connection = pool.get().await.map_err(|error| {
+    format!("Cannot acquire database connection for PR comment: {error}")
+  })?;
+  let transaction = connection
+    .transaction()
+    .await
+    .map_err(|error| format!("Cannot start PR comment transaction: {error}"))?;
+  transaction
+    .batch_execute("SET LOCAL lock_timeout = '45s'")
+    .await
+    .map_err(|error| format!("Cannot set PR comment lock timeout: {error}"))?;
+  transaction
+    .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[
+      &lock_key,
+    ])
+    .await
+    .map_err(|error| format!("Cannot acquire PR comment lock: {error}"))?;
+
+  let evaluation = transaction
+    .query_one(
+      "SELECT commit_hash, superseded_by, status FROM evaluations WHERE id = \
+       $1",
+      &[&event.evaluation_id],
+    )
+    .await
+    .map_err(|error| {
+      format!("Cannot refresh evaluation for PR comment: {error}")
+    })?;
+  let current_commit: String = evaluation.get("commit_hash");
+  let superseded_by: Option<uuid::Uuid> = evaluation.get("superseded_by");
+  let status: String = evaluation.get("status");
+  if current_commit != event.commit_hash
+    || superseded_by.is_some()
+    || status != EvaluationStatus::Completed.as_db_str()
+  {
+    let _ = transaction.rollback().await;
+    return Ok(());
+  }
+  let rows = transaction
+    .query(
+      "SELECT status, COUNT(*) AS count FROM builds WHERE evaluation_id = $1 \
+       AND job_name NOT LIKE 'drv:%' GROUP BY status",
+      &[&event.evaluation_id],
+    )
+    .await
+    .map_err(|error| format!("Cannot refresh PR build counts: {error}"))?;
+  let counts = rows
+    .into_iter()
+    .map(|row| {
+      let status: String = row.get("status");
+      let status = status.parse::<BuildStatus>().map_err(|error| {
+        format!("Cannot parse build status {status:?}: {error}")
+      })?;
+      let count: i64 = row.get("count");
+      Ok((status, count))
+    })
+    .collect::<Result<Vec<_>, String>>()?;
+  let mut latest_event = event.clone();
+  latest_event.jobs = crate::JobSummary::from_counts_including_pending(&counts);
+
+  let update = tokio::time::timeout(
+    Duration::from_secs(40),
+    upsert_github_pr_comment_locked(
+      token,
+      circus_base_url,
+      &owner,
+      &repo,
+      number,
+      &latest_event,
+    ),
+  )
+  .await
+  .map_err(|_| "Timed out while updating GitHub PR comment".to_owned())?;
+  if let Err(error) = update {
+    let _ = transaction.rollback().await;
+    return Err(error);
+  }
+  transaction
+    .commit()
+    .await
+    .map_err(|error| format!("Cannot release PR comment lock: {error}"))?;
+  Ok(())
+}
+
+async fn upsert_github_pr_comment_locked(
+  token: &str,
+  circus_base_url: &str,
+  owner: &str,
+  repo: &str,
+  number: i32,
+  event: &EvaluationEvent,
+) -> Result<(), String> {
+  let base_url = Url::parse(circus_base_url)
+    .map_err(|error| format!("Invalid Circus base URL: {error}"))?;
+  if base_url.scheme() != "https"
+    || base_url.host_str().is_none()
+    || base_url.query().is_some()
+    || base_url.fragment().is_some()
+  {
+    return Err(
+      "Circus base URL must be an HTTPS URL without query or fragment"
+        .to_owned(),
+    );
+  }
+  let detail_url = format!(
+    "{}/evaluation/{}",
+    circus_base_url.trim_end_matches('/'),
+    event.evaluation_id
+  );
+  let http = crate::http_client(Origin::Instance);
+  let api = format!("https://api.github.com/repos/{owner}/{repo}");
+  let api_request = |url: String| {
+    http
+      .get(url)
+      .bearer_auth(token)
+      .header("Accept", "application/vnd.github+json")
+      .header("X-GitHub-Api-Version", circus_http::GITHUB_API_VERSION)
+  };
+  let pull: PullRequestHead = api_request(format!("{api}/pulls/{number}"))
+    .send_checked()
+    .await
+    .map_err(|error| {
+      format!("Cannot read GitHub PR head: {}", ErrorChain(&error))
+    })?
+    .json_capped(circus_http::JSON_LIMIT)
+    .await
+    .map_err(|error| {
+      format!("Cannot decode GitHub PR head: {}", ErrorChain(&error))
+    })?;
+  if !is_current_pr_head(&event.commit_hash, &pull.head.sha) {
+    info!(
+      pull_request = number,
+      event_commit = %event.commit_hash,
+      current_head = %pull.head.sha,
+      "Skipping stale GitHub PR comment update"
+    );
+    return Ok(());
+  }
+
+  let comments: Vec<IssueComment> = api_request(format!(
+    "{api}/issues/{number}/comments?per_page=100&sort=updated&direction=desc"
+  ))
+  .send_checked()
+  .await
+  .map_err(|error| {
+    format!("Cannot list GitHub PR comments: {}", ErrorChain(&error))
+  })?
+  .json_capped(circus_http::JSON_LIMIT)
+  .await
+  .map_err(|error| {
+    format!("Cannot decode GitHub PR comments: {}", ErrorChain(&error))
+  })?;
+
+  let owned_ids = owned_pr_comment_ids(&comments);
+  let current_head: PullRequestHead =
+    api_request(format!("{api}/pulls/{number}"))
+      .send_checked()
+      .await
+      .map_err(|error| {
+        format!("Cannot recheck GitHub PR head: {}", ErrorChain(&error))
+      })?
+      .json_capped(circus_http::JSON_LIMIT)
+      .await
+      .map_err(|error| {
+        format!("Cannot decode GitHub PR head: {}", ErrorChain(&error))
+      })?;
+  if !is_current_pr_head(&event.commit_hash, &current_head.head.sha) {
+    info!(
+      pull_request = number,
+      event_commit = %event.commit_hash,
+      current_head = %current_head.head.sha,
+      "Skipping stale GitHub PR comment update"
+    );
+    return Ok(());
+  }
+  let body = render_pr_comment(event, &detail_url);
+  let target = owned_ids.first().copied();
+  let request = target.map_or_else(
+    || http.post(format!("{api}/issues/{number}/comments")),
+    |id| {
+      http.patch(format!(
+        "https://api.github.com/repos/{owner}/{repo}/issues/comments/{id}"
+      ))
+    },
+  );
+  request
+    .bearer_auth(token)
+    .header("Accept", "application/vnd.github+json")
+    .header("X-GitHub-Api-Version", circus_http::GITHUB_API_VERSION)
+    .json(&serde_json::json!({ "body": body }))
+    .send_checked()
+    .await
+    .map_err(|error| {
+      format!("Cannot upsert GitHub PR comment: {}", ErrorChain(&error))
+    })?;
+
+  // Remove older duplicates created before upserts were serialized. The
+  // author and marker checks ensure human comments are never touched.
+  for duplicate in owned_ids.into_iter().skip(1) {
+    http
+      .delete(format!(
+        "https://api.github.com/repos/{owner}/{repo}/issues/comments/{duplicate}"
+      ))
+      .bearer_auth(token)
+      .header("Accept", "application/vnd.github+json")
+      .header("X-GitHub-Api-Version", circus_http::GITHUB_API_VERSION)
+      .send_checked()
+      .await
+      .map_err(|error| format!("Cannot remove duplicate Circus PR comment: {}", ErrorChain(&error)))?;
+  }
+  info!(pull_request = number, "Updated Circus GitHub PR comment");
+  Ok(())
+}
+
+fn is_owned_pr_comment(author: Option<&str>, body: Option<&str>) -> bool {
+  author == Some(PR_COMMENT_AUTHOR)
+    && body.is_some_and(|body| body.contains(PR_COMMENT_MARKER))
+}
+
+fn is_current_pr_head(event_commit: &str, current_head: &str) -> bool {
+  event_commit == current_head
+}
+
+fn owned_pr_comment_ids(comments: &[IssueComment]) -> Vec<u64> {
+  comments
+    .iter()
+    .filter(|comment| {
+      is_owned_pr_comment(
+        comment.user.as_ref().map(|user| user.login.as_str()),
+        comment.body.as_deref(),
+      )
+    })
+    .map(|comment| comment.id)
+    .collect()
+}
+
+fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
+  let (icon, label) = match event.jobs.status() {
+    "success" => ("✅", "All builds passed"),
+    "failure" => ("❌", "Some builds failed"),
+    "pending" => ("⏳", "Builds are still running"),
+    "cancelled" => ("⚪", "Builds were cancelled"),
+    _ => ("⚠️", "Builds finished with skipped jobs"),
+  };
+  let completed = event.jobs.total - event.jobs.pending - event.jobs.running;
+  format!(
+    "{PR_COMMENT_MARKER}\n### {icon} Circus: {label}\n\n**{completed}/{} jobs \
+     complete** · {} succeeded · {} failed · {} running · {} queued · {} \
+     cancelled · {} skipped\n\nCommit `{}` · [View evaluation \
+     details]({detail_url})",
+    event.jobs.total,
+    event.jobs.succeeded,
+    event.jobs.failed,
+    event.jobs.running,
+    event.jobs.pending,
+    event.jobs.cancelled,
+    event.jobs.skipped,
+    &event.commit_hash[..event.commit_hash.len().min(12)],
+  )
+}
 
 impl WebhookChannel {
   /// POST a JSON body, signed with the current key when one is configured.
@@ -403,5 +709,91 @@ impl Notifier for EmailConfig {
       info!(build_id = %event.build_id, to = to_addr, "Email notification sent");
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod pr_comment_tests {
+  use uuid::Uuid;
+
+  use super::*;
+  use crate::JobSummary;
+
+  fn event(jobs: JobSummary) -> EvaluationEvent {
+    EvaluationEvent {
+      evaluation_id: Uuid::nil(),
+      project_name: "example".into(),
+      project_url: "https://github.com/owner/repo".into(),
+      jobset_name: "pr".into(),
+      commit_hash: "0123456789abcdef".into(),
+      branch: Some("feature".into()),
+      pr_number: Some(12),
+      source_scope: None,
+      superseded_by: None,
+      jobs,
+    }
+  }
+
+  #[test]
+  fn stale_head_is_not_current() {
+    assert!(is_current_pr_head("new-head", "new-head"));
+    assert!(!is_current_pr_head("old-head", "new-head"));
+  }
+
+  #[test]
+  fn only_app_authored_marked_comments_are_owned() {
+    let comments = [
+      IssueComment {
+        id:   1,
+        body: Some(PR_COMMENT_MARKER.to_owned()),
+        user: Some(CommentAuthor {
+          login: "human".into(),
+        }),
+      },
+      IssueComment {
+        id:   2,
+        body: Some("Circus says hello".into()),
+        user: Some(CommentAuthor {
+          login: PR_COMMENT_AUTHOR.into(),
+        }),
+      },
+      IssueComment {
+        id:   3,
+        body: Some(format!("{PR_COMMENT_MARKER}\nold status")),
+        user: Some(CommentAuthor {
+          login: PR_COMMENT_AUTHOR.into(),
+        }),
+      },
+    ];
+    assert_eq!(owned_pr_comment_ids(&comments), [3]);
+  }
+
+  #[test]
+  fn existing_owned_comment_is_reused_instead_of_created_again() {
+    let comments = [IssueComment {
+      id:   27,
+      body: Some(format!("{PR_COMMENT_MARKER}\nold status")),
+      user: Some(CommentAuthor {
+        login: PR_COMMENT_AUTHOR.into(),
+      }),
+    }];
+    let existing_id = owned_pr_comment_ids(&comments).first().copied();
+    assert_eq!(existing_id, Some(27));
+  }
+
+  #[test]
+  fn rendered_comment_shows_pending_jobs_and_evaluation_link() {
+    let event = event(JobSummary::from_counts_including_pending(&[
+      (circus_common::models::BuildStatus::Succeeded, 2),
+      (circus_common::models::BuildStatus::Running, 1),
+      (circus_common::models::BuildStatus::Pending, 1),
+    ]));
+    let body =
+      render_pr_comment(&event, "https://circus.example/evaluation/abc");
+    assert!(body.contains("Builds are still running"));
+    assert!(body.contains("2/4 jobs complete"));
+    assert!(body.contains("1 running"));
+    assert!(body.contains("1 queued"));
+    assert!(body.contains("https://circus.example/evaluation/abc"));
   }
 }

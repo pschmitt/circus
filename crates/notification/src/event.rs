@@ -188,6 +188,8 @@ pub struct JobSummary {
   pub failed:    i64,
   pub cancelled: i64,
   pub skipped:   i64,
+  pub pending:   i64,
+  pub running:   i64,
 }
 
 impl JobSummary {
@@ -200,17 +202,33 @@ impl JobSummary {
       if !status.is_finished() {
         return None;
       }
-      summary.total += count;
-      match status {
-        BuildStatus::Succeeded => summary.succeeded += count,
-        BuildStatus::Cancelled | BuildStatus::Aborted => {
-          summary.cancelled += count;
-        },
-        BuildStatus::UnsupportedSystem => summary.skipped += count,
-        _ => summary.failed += count,
-      }
+      summary.add(status, count);
     }
     Some(summary)
+  }
+
+  /// Summarize all top-level jobs, including jobs still pending or running.
+  #[must_use]
+  pub fn from_counts_including_pending(counts: &[(BuildStatus, i64)]) -> Self {
+    let mut summary = Self::default();
+    for &(status, count) in counts {
+      summary.add(status, count);
+    }
+    summary
+  }
+
+  const fn add(&mut self, status: BuildStatus, count: i64) {
+    self.total += count;
+    match status {
+      BuildStatus::Succeeded => self.succeeded += count,
+      BuildStatus::Cancelled | BuildStatus::Aborted => {
+        self.cancelled += count;
+      },
+      BuildStatus::UnsupportedSystem => self.skipped += count,
+      BuildStatus::Pending => self.pending += count,
+      BuildStatus::Running => self.running += count,
+      _ => self.failed += count,
+    }
   }
 
   /// Coarse outcome of the whole evaluation: `success` only when every job
@@ -219,6 +237,8 @@ impl JobSummary {
   pub const fn status(&self) -> &'static str {
     if self.failed > 0 {
       "failure"
+    } else if self.pending > 0 || self.running > 0 {
+      "pending"
     } else if self.cancelled > 0 {
       "cancelled"
     } else if self.skipped > 0 {
@@ -229,9 +249,9 @@ impl JobSummary {
   }
 }
 
-/// An evaluation whose top-level jobs have all finished. Sent to generic
-/// webhooks that opted into evaluation events; may be delivered more than
-/// once, so consumers deduplicate by `evaluation_id`.
+/// A completed evaluation snapshot, including jobs that may still be pending
+/// or running after evaluation. Generic webhooks receive only final snapshots;
+/// PR comments use the in-progress counts too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationEvent {
   pub evaluation_id: Uuid,
@@ -301,6 +321,8 @@ mod evaluation_tests {
       failed:    1,
       cancelled: 2,
       skipped:   1,
+      pending:   0,
+      running:   0,
     });
     assert_eq!(mixed.status(), "failure");
 
@@ -313,6 +335,20 @@ mod evaluation_tests {
 
     let empty = JobSummary::from_counts(&[]).unwrap_or_default();
     assert_eq!(empty.status(), "success");
+  }
+
+  #[test]
+  fn pending_arm_jobs_keep_evaluation_status_in_progress() {
+    let summary = JobSummary::from_counts_including_pending(&[
+      (BuildStatus::Succeeded, 3),
+      (BuildStatus::Running, 1),
+      (BuildStatus::Pending, 2),
+    ]);
+    assert_eq!(summary.total, 6);
+    assert_eq!(summary.status(), "pending");
+    assert_eq!(summary.succeeded, 3);
+    assert_eq!(summary.running, 1);
+    assert_eq!(summary.pending, 2);
   }
 
   #[test]

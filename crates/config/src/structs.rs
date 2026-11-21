@@ -388,6 +388,10 @@ fn default_groups_claim() -> String {
 // Manual Default impl below so the default tree fed into `config-rs` matches
 // the per-field `#[serde(default = ...)]` annotations. `#[derive(Default)]`
 // would silently set `enable_retry_queue = false`, which is wrong.
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Notification switches are independent configuration flags"
+)]
 pub struct NotificationsConfig {
   pub webhook_url:               Option<String>,
   /// Path to a file containing the generic webhook URL.
@@ -405,6 +409,11 @@ pub struct NotificationsConfig {
   pub github_token:              Option<String>,
   /// Path to a file containing the GitHub token.
   pub github_token_file:         Option<PathBuf>,
+  /// Enable one bot-owned, updateable GitHub issue comment per pull request.
+  #[serde(default)]
+  pub github_pr_comments:        bool,
+  /// Public base URL used for links from GitHub PR comments to Circus.
+  pub circus_base_url:           Option<String>,
   pub gitea_url:                 Option<String>,
   pub gitea_token:               Option<String>,
   /// Path to a file containing the Gitea token.
@@ -498,6 +507,8 @@ impl Default for NotificationsConfig {
       webhook_evaluation_events: false,
       github_token:              None,
       github_token_file:         None,
+      github_pr_comments:        false,
+      circus_base_url:           None,
       gitea_url:                 None,
       gitea_token:               None,
       gitea_token_file:          None,
@@ -1119,6 +1130,13 @@ mod token_file_tests {
   use std::{fs, path::PathBuf};
 
   use super::NotificationsConfig;
+
+  #[test]
+  fn github_pr_comments_are_opt_in() {
+    let config = NotificationsConfig::default();
+    assert!(!config.github_pr_comments);
+    assert!(config.circus_base_url.is_none());
+  }
 
   fn temp_file(name: &str, content: &str) -> PathBuf {
     let path = std::env::temp_dir()

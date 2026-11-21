@@ -35,6 +35,8 @@ use crate::BuildEvent;
 
 mod delivery;
 
+pub use delivery::upsert_github_pr_comment;
+
 /// HTTP header carrying the HMAC-SHA256 signature of a webhook body.
 const SIGNATURE_HEADER: &str = "X-Circus-Signature";
 /// Header names a caller may not override via custom `headers`.

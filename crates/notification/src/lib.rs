@@ -427,12 +427,9 @@ pub async fn dispatch_build_finished(
   }
 }
 
-/// Deliver an evaluation-finished event to every webhook that opted into
-/// evaluation events, if the evaluation has completed and none of its
-/// top-level jobs is pending or running any more. Called whenever a top-level
-/// job finishes and when an evaluation completes, so whichever comes last
-/// sends the event. Two jobs finishing at the same moment can both send it:
-/// consumers deduplicate by evaluation id.
+/// Update the PR comment and deliver opted-in evaluation webhooks after an
+/// evaluation completes. PR comments can report pending/running jobs; generic
+/// evaluation webhooks continue to receive only final job summaries.
 pub async fn dispatch_evaluation_finished_if_done(
   pool: &PgPool,
   evaluation_id: uuid::Uuid,
@@ -447,6 +444,30 @@ pub async fn dispatch_evaluation_finished_if_done(
       return;
     },
   };
+  if config.github_pr_comments
+    && event.pr_number.is_some()
+    && event.superseded_by.is_none()
+  {
+    match (
+      config.current_github_token(),
+      config.circus_base_url.as_deref(),
+    ) {
+      (Some(token), Some(base_url)) => {
+        if let Err(error) =
+          channel::upsert_github_pr_comment(pool, &token, base_url, &event)
+            .await
+        {
+          error!(%evaluation_id, "GitHub PR comment update failed: {error}");
+        }
+      },
+      (None, _) => {
+        warn!(%evaluation_id, "GitHub PR comments are enabled but no token is configured");
+      },
+      (_, None) => {
+        warn!(%evaluation_id, "GitHub PR comments are enabled but circus_base_url is missing");
+      },
+    }
+  }
   for (channel, origin) in
     resolve_channels(Some(pool), &project, config, encryption_key).await
   {
@@ -454,6 +475,9 @@ pub async fn dispatch_evaluation_finished_if_done(
       continue;
     };
     if !webhook.evaluation_events {
+      continue;
+    }
+    if event.jobs.pending > 0 || event.jobs.running > 0 {
       continue;
     }
     // A short inline retry: unlike build events these do not go through the
@@ -475,8 +499,8 @@ pub async fn dispatch_evaluation_finished_if_done(
   }
 }
 
-/// The event (and its project) for a completed evaluation whose top-level
-/// jobs all finished, `None` while it is still evaluating or building.
+/// The event (and its project) after evaluation is complete, including
+/// top-level jobs that are still pending or running.
 async fn evaluation_event(
   pool: &PgPool,
   evaluation_id: uuid::Uuid,
@@ -486,9 +510,7 @@ async fn evaluation_event(
     return Ok(None);
   }
   let counts = repo::builds::job_status_counts(pool, evaluation_id).await?;
-  let Some(jobs) = JobSummary::from_counts(&counts) else {
-    return Ok(None);
-  };
+  let jobs = JobSummary::from_counts_including_pending(&counts);
   let jobset = repo::jobsets::get(pool, evaluation.jobset_id).await?;
   let project = repo::projects::get(pool, jobset.project_id).await?;
   let event = EvaluationEvent {

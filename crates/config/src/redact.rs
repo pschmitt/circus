@@ -83,6 +83,8 @@ redact_debug!(NotificationsConfig {
   webhook_evaluation_events: visible,
   github_token:              optional_secret,
   github_token_file:         visible,
+  github_pr_comments:        visible,
+  circus_base_url:           visible,
   gitea_url:                 visible,
   gitea_token:               optional_secret,
   gitea_token_file:          visible,
