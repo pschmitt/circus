@@ -59,6 +59,7 @@ fn test_clone_or_fetch_clones_new_repo() {
     work_dir.path(),
     "test-project",
     None,
+    &circus_evaluator::git::GitHubAuth::default(),
   );
 
   assert!(
@@ -86,6 +87,7 @@ fn nix_ref_and_rev_queries_select_non_default_commits() {
     work_dir.path(),
     "test-project",
     None,
+    &circus_evaluator::git::GitHubAuth::default(),
   )
   .expect("clone with Nix ref failed");
   let checkout = gix::open(repo_path).unwrap();
@@ -99,6 +101,7 @@ fn nix_ref_and_rev_queries_select_non_default_commits() {
     work_dir.path(),
     "rev-project",
     None,
+    &circus_evaluator::git::GitHubAuth::default(),
   )
   .expect("clone with Nix revision failed");
   let checkout = gix::open(repo_path).unwrap();
@@ -124,6 +127,7 @@ fn test_clone_or_fetch_fetches_existing() {
       work_dir.path(),
       "test-project",
       None,
+      &circus_evaluator::git::GitHubAuth::default(),
     )
     .expect("first clone failed");
 
@@ -137,6 +141,7 @@ fn test_clone_or_fetch_fetches_existing() {
       work_dir.path(),
       "test-project",
       None,
+      &circus_evaluator::git::GitHubAuth::default(),
     )
     .expect("second fetch failed");
 
@@ -152,6 +157,7 @@ fn test_clone_invalid_url_returns_error() {
     work_dir.path(),
     "bad-proj",
     None,
+    &circus_evaluator::git::GitHubAuth::default(),
   );
   assert!(result.is_err());
 }
@@ -187,6 +193,7 @@ fn newest_annotated_tag_uses_tagger_time() {
     "tag-project",
     None,
     Some("*"),
+    &circus_evaluator::git::GitHubAuth::default(),
   )
   .unwrap();
   circus_evaluator::git::retain_newest_tag(&mut refs);

@@ -58,6 +58,7 @@ getrandom = "0.4.3"
 gix = { version = "0.90.0", default-features = false, features = [
   "blob-diff",
   "blocking-http-transport-reqwest",
+  "credentials",
   "revision",
   "sha1",
   "worktree-mutation",

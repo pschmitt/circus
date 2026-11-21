@@ -12,14 +12,165 @@ use gix::{
   ObjectId,
   Repository,
   bstr::{BStr, ByteSlice},
+  credentials::{
+    helper::{Action, NextAction},
+    protocol::Outcome,
+  },
   progress::Discard,
   refs::{
     FullName,
     transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
   },
   remote::{Direction, fetch::RefMap},
+  sec::identity::Account,
 };
 use url::Url;
+
+/// Runtime GitHub App credentials for a tightly scoped set of repositories.
+/// The token itself is read only when the remote requests credentials, so
+/// rotating the token file does not require restarting the evaluator.
+#[derive(Debug, Clone, Default)]
+pub struct GitHubAuth {
+  token_file:   Option<PathBuf>,
+  repositories: HashSet<String>,
+}
+
+#[cfg(test)]
+mod github_auth_tests {
+  use super::*;
+
+  #[test]
+  fn github_token_is_read_only_for_exact_allowed_https_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let token_file = directory.path().join("token");
+    std::fs::write(&token_file, "fake-installation-token\n").unwrap();
+    let auth = GitHubAuth {
+      token_file:   Some(token_file),
+      repositories: HashSet::from(["owner/private-repo".to_owned()]),
+    };
+
+    assert_eq!(
+      auth.token_for("https://github.com/owner/private-repo.git"),
+      Some("fake-installation-token".to_owned())
+    );
+    for remote in [
+      "https://github.com/owner/other-repo",
+      "http://github.com/owner/private-repo",
+      "https://github.com.evil.invalid/owner/private-repo",
+      "https://user:password@github.com/owner/private-repo",
+      "https://@github.com/owner/private-repo",
+      "https://github.com//owner/private-repo",
+      "https://github.com/owner/private-repo/",
+      "https://github.com/owner/private-repo?token=ignored",
+      "https://github.com/owner/private-repo/tree/main",
+    ] {
+      assert_eq!(auth.token_for(remote), None, "unexpected auth for {remote}");
+    }
+  }
+
+  #[test]
+  fn github_token_fails_closed_for_missing_or_empty_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let token_file = directory.path().join("token");
+    let auth = GitHubAuth {
+      token_file:   Some(token_file.clone()),
+      repositories: HashSet::from(["owner/private-repo".to_owned()]),
+    };
+    let remote = "https://github.com/owner/private-repo";
+    assert_eq!(auth.token_for(remote), None);
+    std::fs::write(&token_file, "  \n").unwrap();
+    assert_eq!(auth.token_for(remote), None);
+  }
+}
+
+impl GitHubAuth {
+  pub(crate) fn from_config(config: &circus_config::EvaluatorConfig) -> Self {
+    Self {
+      token_file:   config.github_token_file.clone(),
+      repositories: config
+        .github_auth_repositories
+        .iter()
+        .filter_map(|repository| normalize_repository(repository))
+        .collect(),
+    }
+  }
+
+  fn is_allowed(&self, remote_url: &str) -> bool {
+    self.token_file.is_some()
+      && github_repository(remote_url)
+        .is_some_and(|repository| self.repositories.contains(&repository))
+  }
+
+  fn provide(&self, remote_url: &str, action: Action) -> Option<Outcome> {
+    match action {
+      Action::Get(context) => {
+        let token = self.token_for(remote_url)?;
+        Some(Outcome {
+          identity: Account {
+            username:            "x-access-token".into(),
+            password:            token,
+            oauth_refresh_token: None,
+          },
+          next:     NextAction::from(context),
+        })
+      },
+      Action::Store(_) | Action::Erase(_) => None,
+    }
+  }
+
+  fn token_for(&self, remote_url: &str) -> Option<String> {
+    if !self.is_allowed(remote_url) {
+      return None;
+    }
+    let token = std::fs::read_to_string(self.token_file.as_ref()?).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_owned())
+  }
+}
+
+fn normalize_repository(repository: &str) -> Option<String> {
+  let repository = repository.trim();
+  let mut parts = repository.split('/');
+  let owner = parts.next()?;
+  let raw_repo = parts.next()?;
+  let repo = raw_repo.strip_suffix(".git").unwrap_or(raw_repo);
+  if owner.is_empty()
+    || repo.is_empty()
+    || repository.chars().any(|character| {
+      matches!(character, '?' | '#' | '@' | ':' | '\\' | ' ' | '\t' | '\n')
+    })
+    || repository.split('/').count() != 2
+  {
+    return None;
+  }
+  Some(format!("{owner}/{repo}"))
+}
+
+fn github_repository(source: &str) -> Option<String> {
+  let authority = source
+    .strip_prefix("https://")?
+    .split(['/', '?', '#'])
+    .next()?;
+  if authority != "github.com" {
+    return None;
+  }
+  let url = Url::parse(source).ok()?;
+  if url.scheme() != "https"
+    || url.host_str() != Some("github.com")
+    || url.query().is_some()
+    || url.fragment().is_some()
+  {
+    return None;
+  }
+  let mut parts = url.path_segments()?;
+  let owner = parts.next()?;
+  let raw_repo = parts.next()?;
+  let repo = raw_repo.strip_suffix(".git").unwrap_or(raw_repo);
+  if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+    return None;
+  }
+  Some(format!("{owner}/{repo}"))
+}
 
 /// Query parameters understood by Nix's Git flake fetcher rather than by the
 /// remote Git HTTP endpoint.
@@ -143,11 +294,25 @@ fn open(repo_path: &Path) -> Result<Repository> {
   )?)
 }
 
-fn fetch(repo: &Repository, url: &str, interrupt: &AtomicBool) -> Result<()> {
-  let outcome = repo
-    .remote_at(url)?
-    .with_refspecs(FETCH_REFSPECS, Direction::Fetch)?
-    .connect(Direction::Fetch)?
+fn fetch(
+  repo: &Repository,
+  url: &str,
+  interrupt: &AtomicBool,
+  github_auth: &GitHubAuth,
+) -> Result<()> {
+  let remote_url = clone_url(url);
+  let remote = repo
+    .remote_at(remote_url.clone())?
+    .with_refspecs(FETCH_REFSPECS, Direction::Fetch)?;
+  let mut connection = remote.connect(Direction::Fetch)?;
+  if github_auth.is_allowed(&remote_url) {
+    let github_auth = github_auth.clone();
+    let remote_url = remote_url.clone();
+    connection.set_credentials(move |action| {
+      Ok(github_auth.provide(&remote_url, action))
+    });
+  }
+  let outcome = connection
     .prepare_fetch(Discard, gix::remote::ref_map::Options::default())?
     .receive(Discard, interrupt)?;
   prune(repo, &outcome.ref_map)
@@ -299,13 +464,14 @@ fn clone_or_open_and_fetch(
   work_dir: &Path,
   project_name: &str,
   interrupt: &AtomicBool,
+  github_auth: &GitHubAuth,
 ) -> Result<(PathBuf, Repository)> {
   let repo_path = work_dir.join(project_name);
   if !repo_path.exists() {
     gix::init(&repo_path)?;
   }
   let repo = open(&repo_path)?;
-  fetch(&repo, &clone_url(url), interrupt)?;
+  fetch(&repo, url, interrupt, github_auth)?;
   Ok((repo_path, repo))
 }
 
@@ -322,12 +488,14 @@ pub fn list_matching_refs(
   project_name: &str,
   branch_pattern: Option<&str>,
   tag_pattern: Option<&str>,
+  github_auth: &GitHubAuth,
 ) -> Result<Vec<DiscoveredRef>> {
   let (_repo_path, repo) = clone_or_open_and_fetch(
     url,
     work_dir,
     project_name,
     &AtomicBool::new(false),
+    github_auth,
   )?;
   let mut refs = Vec::new();
 
@@ -485,9 +653,15 @@ pub fn source_contains_commit(
   branch: Option<&str>,
   commit: &str,
   interrupt: &AtomicBool,
+  github_auth: &GitHubAuth,
 ) -> Result<bool> {
-  let (_repo_path, repo) =
-    clone_or_open_and_fetch(url, work_dir, project_name, interrupt)?;
+  let (_repo_path, repo) = clone_or_open_and_fetch(
+    url,
+    work_dir,
+    project_name,
+    interrupt,
+    github_auth,
+  )?;
   let tip = match branch {
     Some(branch) => {
       let git_ref = format!("refs/remotes/origin/{branch}");
@@ -514,12 +688,14 @@ pub fn clone_or_fetch(
   work_dir: &Path,
   project_name: &str,
   branch: Option<&str>,
+  github_auth: &GitHubAuth,
 ) -> Result<(PathBuf, String)> {
   let (repo_path, repo) = clone_or_open_and_fetch(
     url,
     work_dir,
     project_name,
     &AtomicBool::new(false),
+    github_auth,
   )?;
   let (hash, oid) = resolve_source_commit(&repo, url, branch)?;
 
@@ -542,6 +718,7 @@ pub fn checkout_named_ref(
   project_name: &str,
   kind: RefKind,
   name: &str,
+  github_auth: &GitHubAuth,
 ) -> Result<(PathBuf, String)> {
   let git_ref = match kind {
     RefKind::Branch => format!("refs/remotes/origin/{name}"),
@@ -552,6 +729,7 @@ pub fn checkout_named_ref(
     work_dir,
     project_name,
     &AtomicBool::new(false),
+    github_auth,
   )?;
   let (hash, oid) = resolve_ref(&repo, &git_ref).map_err(|e| {
     CiError::NotFound(format!("Git ref '{git_ref}' not found: {e}"))
@@ -576,12 +754,14 @@ pub fn fetch_and_checkout_commit(
   work_dir: &Path,
   project_name: &str,
   commit_sha: &str,
+  github_auth: &GitHubAuth,
 ) -> Result<PathBuf> {
   let (repo_path, repo) = clone_or_open_and_fetch(
     url,
     work_dir,
     project_name,
     &AtomicBool::new(false),
+    github_auth,
   )?;
   checkout(&repo, parse_commit(&repo, commit_sha)?)?;
   Ok(repo_path)

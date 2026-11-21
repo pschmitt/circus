@@ -404,6 +404,7 @@ async fn evaluate_pending_eval(
   let work_dir = config.work_dir.clone();
   let project_name = jobset.project_name.clone();
   let target_commit = claimed.commit_hash.clone();
+  let github_auth = crate::git::GitHubAuth::from_config(config);
 
   let repo_path = tokio::time::timeout(
     git_timeout,
@@ -413,6 +414,7 @@ async fn evaluate_pending_eval(
         &work_dir,
         &project_name,
         &target_commit,
+        &github_auth,
       )
     }),
   )
@@ -919,6 +921,7 @@ async fn watch_branch_history(
     let project_name = jobset.project_name.clone();
     let branch = branch.clone();
     let commit = eval.commit_hash.clone();
+    let github_auth = crate::git::GitHubAuth::from_config(config);
     let interrupt = Arc::new(AtomicBool::new(false));
     let mut task = tokio::task::spawn_blocking({
       let interrupt = Arc::clone(&interrupt);
@@ -930,6 +933,7 @@ async fn watch_branch_history(
           branch.as_deref(),
           &commit,
           &interrupt,
+          &github_auth,
         )
       }
     });
@@ -1066,6 +1070,7 @@ async fn evaluate_matching_refs(
   let discover_url = jobset.repository_url.clone();
   let discover_work_dir = config.work_dir.clone();
   let discover_project_name = jobset.project_name.clone();
+  let github_auth = crate::git::GitHubAuth::from_config(config);
   let mut refs = tokio::time::timeout(
     git_timeout,
     tokio::task::spawn_blocking(move || {
@@ -1075,6 +1080,7 @@ async fn evaluate_matching_refs(
         &discover_project_name,
         branch_pattern.as_deref(),
         tag_pattern.as_deref(),
+        &github_auth,
       )
     }),
   )
@@ -1269,6 +1275,7 @@ async fn evaluate_single_ref(
   let work_dir = config.work_dir.clone();
   let project_name = jobset.project_name.clone();
   let branch = jobset.branch.clone();
+  let github_auth = crate::git::GitHubAuth::from_config(config);
   let (repo_path, commit_hash) = tokio::time::timeout(
     git_timeout,
     tokio::task::spawn_blocking(move || {
@@ -1277,6 +1284,7 @@ async fn evaluate_single_ref(
         &work_dir,
         &project_name,
         branch.as_deref(),
+        &github_auth,
       )
     }),
   )
@@ -1568,11 +1576,18 @@ async fn discover_projects_without_jobsets(
     let url = project.repository_url.clone();
     let work_dir = config.work_dir.clone();
     let project_name = project.name.clone();
+    let github_auth = crate::git::GitHubAuth::from_config(config);
 
     let clone_result = tokio::time::timeout(
       git_timeout,
       tokio::task::spawn_blocking(move || {
-        crate::git::clone_or_fetch(&url, &work_dir, &project_name, None)
+        crate::git::clone_or_fetch(
+          &url,
+          &work_dir,
+          &project_name,
+          None,
+          &github_auth,
+        )
       }),
     )
     .await;

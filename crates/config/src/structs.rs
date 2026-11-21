@@ -285,6 +285,14 @@ pub struct EvaluatorConfig {
   /// substituters already serves needs no build of its own; without these,
   /// only `http(s)://` substituters are checked.
   pub s3_substituters: Option<S3SubstituterCredentials>,
+
+  /// Path to the rotating GitHub App installation token used by gix when
+  /// fetching explicitly allowed private GitHub repositories.
+  pub github_token_file: Option<PathBuf>,
+
+  /// Exact owner/repo names that may use `github_token_file` for HTTPS
+  /// fetches.
+  pub github_auth_repositories: Vec<String>,
 }
 
 /// Credentials the evaluator signs `s3://` substituter lookups with. Bucket,
@@ -988,22 +996,24 @@ impl Default for UiConfig {
 impl Default for EvaluatorConfig {
   fn default() -> Self {
     Self {
-      poll_interval:        60,
-      git_timeout:          600,
-      nix_timeout:          1800,
-      max_eval_time:        None,
-      max_concurrent_evals: 4,
-      work_dir:             PathBuf::from("/tmp/circus-evaluator"),
-      restrict_eval:        true,
-      allow_ifd:            false,
-      allowed_uris:         Vec::new(),
-      auto_allowed_uris:    true,
-      require_locked_flake: false,
-      strict_errors:        false,
-      eval_workers:         4,
-      memory_limit_mb:      None,
-      systems:              None,
-      s3_substituters:      None,
+      poll_interval:            60,
+      git_timeout:              600,
+      nix_timeout:              1800,
+      max_eval_time:            None,
+      max_concurrent_evals:     4,
+      work_dir:                 PathBuf::from("/tmp/circus-evaluator"),
+      restrict_eval:            true,
+      allow_ifd:                false,
+      allowed_uris:             Vec::new(),
+      auto_allowed_uris:        true,
+      require_locked_flake:     false,
+      strict_errors:            false,
+      eval_workers:             4,
+      memory_limit_mb:          None,
+      systems:                  None,
+      s3_substituters:          None,
+      github_token_file:        None,
+      github_auth_repositories: Vec::new(),
     }
   }
 }
