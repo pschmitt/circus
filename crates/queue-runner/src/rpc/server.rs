@@ -1410,8 +1410,6 @@ async fn export_paths(
   strip_trailer: bool,
   sink: &drv_sink::Client,
 ) -> misstep::Result<()> {
-  use tokio::io::AsyncReadExt as _;
-
   const TRAILER: [u8; 8] = [0; 8];
 
   let mut child = tokio::process::Command::new("nix-store")
@@ -1429,13 +1427,10 @@ async fn export_paths(
   let mut buf = vec![0u8; 1024 * 1024];
   let mut held = 0;
   loop {
-    let n = stdout
-      .read(&mut buf[held..])
+    let remaining = buf.len() - held;
+    let n = read_export_chunk(&mut stdout, &mut buf[held..])
       .await
       .map_err(|e| misstep::report!("read nix-store --export: {e}"))?;
-    if n == 0 {
-      break;
-    }
     let len = held + n;
     let send = if strip_trailer {
       len.saturating_sub(TRAILER.len())
@@ -1453,6 +1448,9 @@ async fn export_paths(
     }
     buf.copy_within(send..len, 0);
     held = len - send;
+    if n < remaining {
+      break;
+    }
   }
   if strip_trailer && buf[..held] != TRAILER {
     return Err(misstep::report!(
@@ -1465,6 +1463,24 @@ async fn export_paths(
     return Err(misstep::report!("nix-store --export exited with {status}"));
   }
   Ok(())
+}
+
+/// Fill an RPC chunk across short pipe reads. A short chunk means EOF.
+async fn read_export_chunk(
+  reader: &mut (impl tokio::io::AsyncRead + Unpin),
+  buffer: &mut [u8],
+) -> std::io::Result<usize> {
+  use tokio::io::AsyncReadExt as _;
+
+  let mut filled = 0;
+  while filled < buffer.len() {
+    let received = reader.read(&mut buffer[filled..]).await?;
+    if received == 0 {
+      break;
+    }
+    filled += received;
+  }
+  Ok(filled)
 }
 
 /// Sign a narinfo fingerprint with the on-disk Nix signing key, returning
@@ -1806,6 +1822,22 @@ fn check_pinned_name(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn export_chunks_fill_across_short_reads_and_flush_at_eof() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let (mut reader, mut writer) = tokio::io::duplex(4);
+    let writing = tokio::spawn(async move {
+      writer.write_all(b"abcdefghijklmnopqrst").await.unwrap();
+    });
+    let mut buffer = [0; 16];
+    let length = read_export_chunk(&mut reader, &mut buffer).await.unwrap();
+    assert_eq!(&buffer[..length], b"abcdefghijklmnop");
+    let length = read_export_chunk(&mut reader, &mut buffer).await.unwrap();
+    assert_eq!(&buffer[..length], b"qrst");
+    writing.await.unwrap();
+  }
 
   #[test]
   fn matching_token_finds_the_matching_entry() {
