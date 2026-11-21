@@ -118,6 +118,13 @@ struct WorkerView {
   cpu_count:    i32,
   speed_factor: f32,
   last_seen:    String,
+  builds:       Vec<WorkerBuildView>,
+}
+
+struct WorkerBuildView {
+  id:      Uuid,
+  name:    String,
+  project: String,
 }
 
 #[page("/dash")]
@@ -757,9 +764,9 @@ async fn repositories_view(
 pub(in crate::routes::dashboard) async fn workers_activity(
   cx: &Cx,
 ) -> Result<impl View> {
-  shard_viewer(cx, DashboardPage::Home).await?;
+  let viewer = shard_viewer(cx, DashboardPage::Home).await?;
   let state = app_context::<AppState>(cx);
-  let mut workers = load_workers(state).await;
+  let mut workers = load_workers(state, viewer.is_admin).await?;
   Ok(live! {
     loop {
       let token = emit! { workers_view(workers: &workers) }?;
@@ -770,7 +777,8 @@ pub(in crate::routes::dashboard) async fn workers_activity(
       if !topcoat::runtime::connected(cx) {
         break Ok(token);
       }
-      workers = load_workers(state).await;
+      let viewer = shard_viewer(cx, DashboardPage::Home).await?;
+      workers = load_workers(state, viewer.is_admin).await?;
     }
   })
 }
@@ -829,48 +837,100 @@ async fn worker_row(worker: &WorkerView) -> Result<impl View> {
         <div><dt>"Speed factor"</dt><dd>(worker.speed_factor)</dd></div>
         <div><dt>"Last seen"</dt><dd>(worker.last_seen.as_str())</dd></div>
       </dl>
+      if !worker.builds.is_empty() {
+        <ul class="simple-project-jobs" aria-label="Running builds">
+          for build in &worker.builds {
+            <li>
+              <a class="simple-row-link simple-build-row" href=(format!("/build/{}/log", build.id))>
+                <span class="simple-build-main">
+                  <strong title=(build.name.as_str())>(display_job_name(&build.name))</strong>
+                  <span>(build.project.as_str())</span>
+                </span>
+                <span class="simple-status-label running">"Running"</span>
+              </a>
+            </li>
+          }
+        </ul>
+      }
     </details></li>
   })
 }
 
-async fn load_workers(state: &AppState) -> Vec<WorkerView> {
-  circus_common::repo::builder_sessions::list(&state.pool)
+async fn load_workers(
+  state: &AppState,
+  include_hidden: bool,
+) -> Result<Vec<WorkerView>> {
+  let workers =
+    circus_common::repo::builder_sessions::list(&state.pool).await?;
+  let client = state
+    .pool
+    .get()
     .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|worker| {
-      WorkerView {
-        name:         worker.name,
-        systems:      if worker.systems.is_empty() {
-          "unknown".to_owned()
-        } else {
-          worker.systems.join(", ")
-        },
-        status_text:  if !worker.connected {
-          "Offline"
-        } else if worker.current_jobs > 0 {
-          "Busy"
-        } else {
-          "Idle"
-        },
-        status_class: if !worker.connected {
-          "skipped"
-        } else if worker.current_jobs > 0 {
-          "running"
-        } else {
-          "succeeded"
-        },
-        current_jobs: worker.current_jobs,
-        max_jobs:     worker.max_jobs,
-        cpu_count:    worker.cpu_count,
-        speed_factor: worker.speed_factor,
-        last_seen:    worker.last_seen.map_or_else(
-          || "Unknown".to_owned(),
-          |time| relative_time(time.as_second()),
-        ),
-      }
-    })
-    .collect()
+    .map_err(circus_common::CiError::from)?;
+  let rows = client
+    .query(
+      "SELECT b.agent_machine_id, b.id, b.job_name, p.name
+     FROM builds b
+     JOIN evaluations e ON e.id = b.evaluation_id
+     JOIN jobsets j ON j.id = e.jobset_id
+     JOIN projects p ON p.id = j.project_id
+     WHERE b.status = 'running' AND b.agent_machine_id IS NOT NULL
+       AND ($1::boolean OR NOT e.hidden)
+     ORDER BY b.started_at DESC NULLS LAST, b.id",
+      &[&include_hidden],
+    )
+    .await
+    .map_err(circus_common::CiError::from)?;
+  let mut builds: HashMap<Uuid, Vec<WorkerBuildView>> = HashMap::new();
+  for row in rows {
+    builds.entry(row.get(0)).or_default().push(WorkerBuildView {
+      id:      row.get(1),
+      name:    row.get(2),
+      project: row.get(3),
+    });
+  }
+  Ok(
+    workers
+      .into_iter()
+      .map(|worker| {
+        WorkerView {
+          builds:       if worker.connected {
+            builds.remove(&worker.machine_id).unwrap_or_default()
+          } else {
+            Vec::new()
+          },
+          name:         worker.name,
+          systems:      if worker.systems.is_empty() {
+            "unknown".to_owned()
+          } else {
+            worker.systems.join(", ")
+          },
+          status_text:  if !worker.connected {
+            "Offline"
+          } else if worker.current_jobs > 0 {
+            "Busy"
+          } else {
+            "Idle"
+          },
+          status_class: if !worker.connected {
+            "skipped"
+          } else if worker.current_jobs > 0 {
+            "running"
+          } else {
+            "succeeded"
+          },
+          current_jobs: worker.current_jobs,
+          max_jobs:     worker.max_jobs,
+          cpu_count:    worker.cpu_count,
+          speed_factor: worker.speed_factor,
+          last_seen:    worker.last_seen.map_or_else(
+            || "Unknown".to_owned(),
+            |time| relative_time(time.as_second()),
+          ),
+        }
+      })
+      .collect(),
+  )
 }
 
 #[component]
