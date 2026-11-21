@@ -113,7 +113,8 @@ pub async fn upsert_github_pr_comment(
   let status: String = evaluation.get("status");
   if current_commit != event.commit_hash
     || superseded_by.is_some()
-    || status != EvaluationStatus::Completed.as_db_str()
+    || status != event.evaluation_status.as_db_str()
+    || event.evaluation_status == EvaluationStatus::Pending
   {
     let _ = transaction.rollback().await;
     return Ok(());
@@ -317,12 +318,21 @@ fn owned_pr_comment_ids(comments: &[IssueComment]) -> Vec<u64> {
 }
 
 fn render_pr_comment(event: &EvaluationEvent, detail_url: &str) -> String {
-  let (icon, label) = match event.jobs.status() {
-    "success" => ("✅", "All builds passed"),
-    "failure" => ("❌", "Some builds failed"),
-    "pending" => ("⏳", "Builds are still running"),
-    "cancelled" => ("⚪", "Builds were cancelled"),
-    _ => ("⚠️", "Builds finished with skipped jobs"),
+  let (icon, label) = match event.evaluation_status {
+    EvaluationStatus::Pending => ("⏳", "Evaluation queued"),
+    EvaluationStatus::Running => ("⏳", "Evaluation is running"),
+    EvaluationStatus::Failed => ("❌", "Evaluation failed"),
+    EvaluationStatus::TimedOut => ("⏱️", "Evaluation timed out"),
+    EvaluationStatus::Cancelled => ("⚪", "Evaluation was cancelled"),
+    EvaluationStatus::Completed => {
+      match event.jobs.status() {
+        "success" => ("✅", "All builds passed"),
+        "failure" => ("❌", "Some builds failed"),
+        "pending" => ("⏳", "Builds are still running"),
+        "cancelled" => ("⚪", "Builds were cancelled"),
+        _ => ("⚠️", "Builds finished with skipped jobs"),
+      }
+    },
   };
   let completed = event.jobs.total - event.jobs.pending - event.jobs.running;
   format!(
@@ -726,6 +736,7 @@ mod pr_comment_tests {
       project_url: "https://github.com/owner/repo".into(),
       jobset_name: "pr".into(),
       commit_hash: "0123456789abcdef".into(),
+      evaluation_status: EvaluationStatus::Completed,
       branch: Some("feature".into()),
       pr_number: Some(12),
       source_scope: None,
@@ -795,5 +806,27 @@ mod pr_comment_tests {
     assert!(body.contains("1 running"));
     assert!(body.contains("1 queued"));
     assert!(body.contains("https://circus.example/evaluation/abc"));
+  }
+
+  #[test]
+  fn rendered_comment_uses_evaluation_failure_and_timeout_labels() {
+    let mut event = event(JobSummary::default());
+    event.evaluation_status = EvaluationStatus::Running;
+    assert!(
+      render_pr_comment(&event, "https://circus.example/evaluation/abc")
+        .contains("Evaluation is running")
+    );
+
+    event.evaluation_status = EvaluationStatus::Failed;
+    assert!(
+      render_pr_comment(&event, "https://circus.example/evaluation/abc")
+        .contains("Evaluation failed")
+    );
+
+    event.evaluation_status = EvaluationStatus::TimedOut;
+    assert!(
+      render_pr_comment(&event, "https://circus.example/evaluation/abc")
+        .contains("Evaluation timed out")
+    );
   }
 }

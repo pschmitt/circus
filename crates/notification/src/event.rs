@@ -5,7 +5,7 @@
 //! is also the unit serialized into the retry-queue task payload, so it owns
 //! the status-to-forge mappings that delivery relies on.
 
-use circus_common::models::{Build, BuildStatus, Project};
+use circus_common::models::{Build, BuildStatus, EvaluationStatus, Project};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -249,23 +249,24 @@ impl JobSummary {
   }
 }
 
-/// A completed evaluation snapshot, including jobs that may still be pending
-/// or running after evaluation. Generic webhooks receive only final snapshots;
-/// PR comments use the in-progress counts too.
+/// An evaluation snapshot, including jobs that may still be pending or
+/// running. Generic webhooks receive only final snapshots; PR comments also
+/// report evaluation lifecycle changes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationEvent {
-  pub evaluation_id: Uuid,
-  pub project_name:  String,
-  pub project_url:   String,
-  pub jobset_name:   String,
-  pub commit_hash:   String,
+  pub evaluation_id:     Uuid,
+  pub project_name:      String,
+  pub project_url:       String,
+  pub jobset_name:       String,
+  pub commit_hash:       String,
+  pub evaluation_status: EvaluationStatus,
   /// The branch the evaluation is for: the pull request's head branch, else
   /// the jobset's branch.
-  pub branch:        Option<String>,
-  pub pr_number:     Option<i32>,
-  pub source_scope:  Option<String>,
-  pub superseded_by: Option<Uuid>,
-  pub jobs:          JobSummary,
+  pub branch:            Option<String>,
+  pub pr_number:         Option<i32>,
+  pub source_scope:      Option<String>,
+  pub superseded_by:     Option<Uuid>,
+  pub jobs:              JobSummary,
 }
 
 impl EvaluationEvent {
@@ -354,16 +355,17 @@ mod evaluation_tests {
   #[test]
   fn payload_is_tagged() {
     let event = EvaluationEvent {
-      evaluation_id: Uuid::nil(),
-      project_name:  "p".into(),
-      project_url:   "https://github.com/o/r".into(),
-      jobset_name:   "main".into(),
-      commit_hash:   "abc".into(),
-      branch:        Some("main".into()),
-      pr_number:     None,
-      source_scope:  None,
-      superseded_by: None,
-      jobs:          JobSummary {
+      evaluation_id:     Uuid::nil(),
+      project_name:      "p".into(),
+      project_url:       "https://github.com/o/r".into(),
+      jobset_name:       "main".into(),
+      commit_hash:       "abc".into(),
+      evaluation_status: EvaluationStatus::Completed,
+      branch:            Some("main".into()),
+      pr_number:         None,
+      source_scope:      None,
+      superseded_by:     None,
+      jobs:              JobSummary {
         total: 1,
         succeeded: 1,
         ..JobSummary::default()

@@ -417,7 +417,7 @@ pub async fn dispatch_build_finished(
   if let Some(pool) = pool
     && !BuildEvent::from_build(build, project, commit_hash).is_dependency()
   {
-    dispatch_evaluation_finished_if_done(
+    dispatch_evaluation_update(
       pool,
       build.evaluation_id,
       config,
@@ -427,10 +427,9 @@ pub async fn dispatch_build_finished(
   }
 }
 
-/// Update the PR comment and deliver opted-in evaluation webhooks after an
-/// evaluation completes. PR comments can report pending/running jobs; generic
-/// evaluation webhooks continue to receive only final job summaries.
-pub async fn dispatch_evaluation_finished_if_done(
+/// Update the opt-in PR status comment for evaluation lifecycle changes and
+/// deliver generic evaluation webhooks only after a completed evaluation.
+pub async fn dispatch_evaluation_update(
   pool: &PgPool,
   evaluation_id: uuid::Uuid,
   config: &NotificationsConfig,
@@ -447,6 +446,7 @@ pub async fn dispatch_evaluation_finished_if_done(
   if config.github_pr_comments
     && event.pr_number.is_some()
     && event.superseded_by.is_none()
+    && event.evaluation_status != EvaluationStatus::Pending
   {
     match (
       config.current_github_token(),
@@ -467,6 +467,9 @@ pub async fn dispatch_evaluation_finished_if_done(
         warn!(%evaluation_id, "GitHub PR comments are enabled but circus_base_url is missing");
       },
     }
+  }
+  if event.evaluation_status != EvaluationStatus::Completed {
+    return;
   }
   for (channel, origin) in
     resolve_channels(Some(pool), &project, config, encryption_key).await
@@ -499,16 +502,13 @@ pub async fn dispatch_evaluation_finished_if_done(
   }
 }
 
-/// The event (and its project) after evaluation is complete, including
-/// top-level jobs that are still pending or running.
+/// Build a fresh event (and project) from the current evaluation state,
+/// including top-level jobs that are still pending or running.
 async fn evaluation_event(
   pool: &PgPool,
   evaluation_id: uuid::Uuid,
 ) -> circus_common::error::Result<Option<(EvaluationEvent, Project)>> {
   let evaluation = repo::evaluations::get(pool, evaluation_id).await?;
-  if evaluation.status != EvaluationStatus::Completed {
-    return Ok(None);
-  }
   let counts = repo::builds::job_status_counts(pool, evaluation_id).await?;
   let jobs = JobSummary::from_counts_including_pending(&counts);
   let jobset = repo::jobsets::get(pool, evaluation.jobset_id).await?;
@@ -519,6 +519,7 @@ async fn evaluation_event(
     project_url: project.repository_url.clone(),
     jobset_name: jobset.name,
     commit_hash: evaluation.commit_hash,
+    evaluation_status: evaluation.status,
     branch: evaluation.pr_head_branch.or(jobset.branch),
     pr_number: evaluation.pr_number,
     source_scope: evaluation.source_scope,

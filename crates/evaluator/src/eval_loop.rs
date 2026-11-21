@@ -167,6 +167,13 @@ async fn run_cycle(
       {
         tracing::warn!(eval_id = %eval.id, "Failed to reject pending evaluation: {e}");
       }
+      circus_notification::dispatch_evaluation_update(
+        pool,
+        eval.id,
+        notifications_config,
+        notification_secret_key,
+      )
+      .await;
     }
   }
 
@@ -214,6 +221,13 @@ async fn run_cycle(
                 "Failed to record evaluation failure status: {mark_err}"
               );
             }
+            circus_notification::dispatch_evaluation_update(
+              pool,
+              eval.id,
+              notifications_config,
+              notification_secret_key,
+            )
+            .await;
 
             warn_on_disk_pressure(&msg);
           }
@@ -356,6 +370,13 @@ async fn evaluate_pending_eval(
       pr_number = ?claimed.pr_number,
       "Processing pending evaluation"
   );
+  circus_notification::dispatch_evaluation_update(
+    pool,
+    claimed.id,
+    notifications_config,
+    notification_secret_key,
+  )
+  .await;
 
   log_disk_space(&config.work_dir, &jobset.name);
 
@@ -567,6 +588,13 @@ async fn run_nix_and_record_builds(
       Some("Evaluation exceeded max_eval_time"),
     )
     .await?;
+    circus_notification::dispatch_evaluation_update(
+      pool,
+      eval.id,
+      notifications_config,
+      notification_secret_key,
+    )
+    .await;
     return Ok(());
   }
 
@@ -686,7 +714,7 @@ async fn run_nix_and_record_builds(
 
       // An evaluation whose jobs were all cached is done right here; no job
       // finishing later will report it.
-      circus_notification::dispatch_evaluation_finished_if_done(
+      circus_notification::dispatch_evaluation_update(
         pool,
         eval.id,
         notifications_config,
@@ -709,6 +737,13 @@ async fn run_nix_and_record_builds(
       };
       repo::evaluations::finish_running(pool, eval.id, status, Some(&msg))
         .await?;
+      circus_notification::dispatch_evaluation_update(
+        pool,
+        eval.id,
+        notifications_config,
+        notification_secret_key,
+      )
+      .await;
     },
   }
 
