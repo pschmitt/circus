@@ -134,7 +134,17 @@ impl<'a> LockedSource<'a> {
         };
         // owner/repo, not the full /rev, whose trailing `?narHash` fails
         // checkURI.
-        vec![format!("{}:{owner}/{repo}", self.kind())]
+        if self.kind() == "gitlab" {
+          // Nix URI rendering escapes an already-escaped subgroup in the
+          // lockfile owner, e.g. team%2Fsubgroup becomes team%252Fsubgroup.
+          vec![format!(
+            "gitlab:{}/{}",
+            query_encode(owner),
+            query_encode(repo)
+          )]
+        } else {
+          vec![format!("{}:{owner}/{repo}", self.kind())]
+        }
       },
 
       "tarball" | "file" => {
@@ -243,6 +253,24 @@ mod tests {
         "https://releases.nixos.org/x/",
         "https://releases.nixos.org/x/nixexprs.tar.xz",
       ]
+    );
+  }
+
+  #[test]
+  fn gitlab_subgroup_matches_nix_rendered_uri() {
+    let lock = r#"{
+      "root": "root", "nodes": {
+        "root": {},
+        "project": { "locked": {
+          "type": "gitlab", "owner": "team%2Fsubgroup", "repo": "project"
+        } }
+      }
+    }"#;
+    assert_eq!(
+      Lockfile::parse(lock)
+        .expect("valid lockfile")
+        .allowed_uris(),
+      vec!["gitlab:team%252Fsubgroup/project"]
     );
   }
 
