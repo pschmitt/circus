@@ -9,7 +9,12 @@ use circus_common::{
 use topcoat::{
   Result,
   context::{Cx, app_context},
-  router::{error::RouterErrorExt, page, path_param, query_params},
+  router::{
+    error::{RouterErrorExt, not_found},
+    page,
+    path_param,
+    query_params,
+  },
   runtime::shard,
   view::{View, component, emit, live, view},
 };
@@ -1315,16 +1320,22 @@ pub(in crate::routes::dashboard) async fn build_log_page(
       &state.config.logs.log_dir,
       Path::new(path),
     )
-    .await
-    .ok_or_not_found()?;
-    let raw = read_log_file(&path).await.ok().ok_or_not_found()?;
-    Some(parse_build_log(&raw))
-  } else if live {
-    None
+    .await;
+    match path {
+      Some(path) => {
+        read_log_file(&path)
+          .await
+          .ok()
+          .map(|raw| parse_build_log(&raw))
+      },
+      None => None,
+    }
   } else {
-    None::<BuildLogView>.ok_or_not_found()?;
-    unreachable!("missing log is returned as not found")
+    None
   };
+  if !simple && log.is_none() {
+    return Err(not_found().into());
+  }
   let build = build_view(&build);
   let title = format!("Log {}", build.job_name);
 
@@ -1341,8 +1352,25 @@ pub(in crate::routes::dashboard) async fn build_log_page(
           <main class="simple-content">
             if let Some(log) = log {
               log_page(details: &build, log: log, simple: true)
-            } else {
+            } else if live {
               live_log_page(details: &build, id: id)
+            } else {
+              <section class="simple-section">
+                <div class="simple-section-heading">
+                  <h1 class="simple-project-title">(build.job_name.as_str())</h1>
+                  <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
+                </div>
+                <dl class="simple-detail-facts">
+                  <div><dt>"Repository"</dt><dd>(lineage.project_name.as_str())</dd></div>
+                  <div><dt>"System"</dt><dd>(build.system.as_str())</dd></div>
+                  <div><dt>"Commit"</dt><dd>(lineage.commit_short.as_str())</dd></div>
+                </dl>
+                if !build.error_message.is_empty() {
+                  <pre class="simple-build-error">(build.error_message.as_str())</pre>
+                } else {
+                  <p class="simple-empty">"Circus has no saved log for this build."</p>
+                }
+              </section>
             }
           </main>
         </section>

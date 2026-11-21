@@ -88,6 +88,9 @@ struct WorkerView {
   status_class: &'static str,
   current_jobs: i32,
   max_jobs:     i32,
+  cpu_count:    i32,
+  speed_factor: f32,
+  last_seen:    String,
 }
 
 #[page("/dash")]
@@ -112,6 +115,7 @@ pub(in crate::routes::dashboard) async fn simple_page(
             <img src="/static/favicon.svg" alt="">
           </a>
           <nav aria-label="Account">
+            <span class="simple-live"><span class="simple-live-dot" aria-hidden="true"></span>"Live"</span>
             if viewer.auth_name.is_empty() {
               <a href="/login">"Sign in"</a>
             } else {
@@ -148,10 +152,6 @@ pub(in crate::routes::dashboard) async fn simple_page(
                 </section>
               </div>
             </fieldset>
-            <footer class="simple-footer">
-              <span class="simple-live-dot" aria-hidden="true"></span>
-              "Updates automatically"
-            </footer>
           }
         </main>
       </section>
@@ -258,18 +258,7 @@ async fn simple_build_results_view(
       } else {
         <ul class="simple-build-list">
           for build in builds {
-            <li>
-              <span class=(format!("simple-status {}", build.status_class)) aria-hidden="true"></span>
-              <div class="simple-build-main">
-                if build.has_log || matches!(build.status_text.as_str(), "Running" | "Pending") {
-                  <a href=(format!("/build/{}/log", build.id))><strong>(build.job_name.as_str())</strong></a>
-                } else {
-                  <strong>(build.job_name.as_str())</strong>
-                }
-                <span>(build.project_name.as_str()) " · " (build.system.as_str())</span>
-              </div>
-              <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
-            </li>
+            simple_build_row(details: build)
           }
         </ul>
       }
@@ -314,14 +303,14 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
       .await?;
     let mut jobs = Vec::new();
     if let Some(evaluation) = evaluations.first() {
-      for status in ["running", "pending"] {
+      for status in [Some("running"), Some("pending"), None] {
         let builds = circus_common::repo::builds::list_filtered(
           &state.pool,
           Some(evaluation.id),
-          Some(status),
+          status,
           None,
           None,
-          100,
+          32,
           0,
         )
         .await?;
@@ -341,7 +330,8 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
         }));
       }
     }
-    jobs.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut seen = std::collections::HashSet::new();
+    jobs.retain(|job| seen.insert(job.id));
     jobset_views.push(ProjectJobsetView {
       name: jobset.name,
       branch: jobset.branch.unwrap_or_else(|| "default branch".to_owned()),
@@ -379,14 +369,18 @@ pub(in crate::routes::dashboard) async fn simple_project_page(
                       <span>(jobset.branch.as_str())</span>
                     </div>
                     if jobset.jobs.is_empty() {
-                      <span class="simple-status-label">"No queued or running jobs"</span>
+                      <span class="simple-status-label">"No builds in the latest evaluation"</span>
                     } else {
                       <ul class="simple-project-jobs">
                         for job in &jobset.jobs {
                           <li>
-                            <span class=(format!("simple-status-label {}", job.status_class))>(job.status_text)</span>
-                            <a href=(format!("/build/{}/log", job.id))>(job.name.as_str())</a>
-                            <span>(job.system.as_str())</span>
+                            <a class="simple-row-link simple-build-row" href=(format!("/build/{}/log", job.id))>
+                              <span class="simple-build-main">
+                                <strong title=(job.name.as_str())>(display_job_name(&job.name))</strong>
+                                <span>(job.system.as_str())</span>
+                              </span>
+                              <span class=(format!("simple-status-label {}", job.status_class))>(job.status_text)</span>
+                            </a>
                           </li>
                         }
                       </ul>
@@ -576,10 +570,21 @@ async fn repositories_view(
       } else {
         <ul class="simple-project-list">
           for project in projects {
-            <li>
+            <li><a class="simple-row-link simple-repo-row" href=(format!("/dash/project/{}", project.summary.id))>
               <div class="simple-project-main">
-                <a href=(format!("/dash/project/{}", project.summary.id))><strong>(project.summary.name.as_str())</strong></a>
-                <span>(project.summary.jobset_count) " jobsets · " (project.summary.systems.as_str())</span>
+                <strong>(project.summary.name.as_str())</strong>
+                <span>(project.summary.systems.as_str())</span>
+              </div>
+              <div class="simple-history-column">
+                if project.history.is_empty() {
+                  <span class="simple-history-empty" aria-label=(project.history_label.as_str())>"No history"</span>
+                } else {
+                  <span class="simple-project-history" role="img" aria-label=(project.history_label.as_str())>
+                    for point in &project.history {
+                      <span class=(format!("simple-history-point {}", point.status_class)) title=(point.status_text) aria-hidden="true"></span>
+                    }
+                  </span>
+                }
               </div>
               <div class="simple-project-health">
                 if project.summary.latest_running > 0 {
@@ -594,22 +599,11 @@ async fn repositories_view(
                 if project.summary.latest_failed > 0 {
                   <span class="simple-status-label failed">"Failed " (project.summary.latest_failed)</span>
                 }
-                if project.history.is_empty() {
-                  <span class="simple-history-empty" aria-label=(project.history_label.as_str())>"No history"</span>
-                } else {
-                  <span class="simple-project-history" role="img" aria-label=(project.history_label.as_str())>
-                    for point in &project.history {
-                      <span
-                        class=(format!("simple-history-point {}", point.status_class))
-                        title=(point.status_text)
-                        aria-hidden="true"
-                      ></span>
-                    }
-                  </span>
+                if !project.summary.last_eval_time.is_empty() {
+                  <time>(project.summary.last_eval_time.as_str())</time>
                 }
-                <time>(project.summary.last_eval_time.as_str())</time>
               </div>
-            </li>
+            </a></li>
           }
         </ul>
       }
@@ -676,15 +670,21 @@ async fn workers_view(workers: &[WorkerView]) -> Result<impl View> {
 #[component]
 async fn worker_row(worker: &WorkerView) -> Result<impl View> {
   Ok(view! {
-    <li>
-      <span class=(format!("simple-status {}", worker.status_class)) aria-hidden="true"></span>
-      <div class="simple-worker-main">
-        <strong>(worker.name.as_str())</strong>
-        <span>(worker.systems.as_str())</span>
-      </div>
-      <span class=(format!("simple-status-label {}", worker.status_class))>(worker.status_text)</span>
-      <span class="simple-worker-jobs">(worker.current_jobs) "/" (worker.max_jobs) " jobs"</span>
-    </li>
+    <li><details class="simple-worker-detail">
+      <summary class="simple-row-link simple-worker-row">
+        <span class="simple-worker-main">
+          <strong>(worker.name.as_str())</strong>
+          <span>(worker.systems.as_str())</span>
+        </span>
+        <span class="simple-worker-jobs">(worker.current_jobs) "/" (worker.max_jobs) " jobs"</span>
+        <span class=(format!("simple-status-label {}", worker.status_class))>(worker.status_text)</span>
+      </summary>
+      <dl class="simple-detail-facts">
+        <div><dt>"CPU cores"</dt><dd>(worker.cpu_count)</dd></div>
+        <div><dt>"Speed factor"</dt><dd>(worker.speed_factor)</dd></div>
+        <div><dt>"Last seen"</dt><dd>(worker.last_seen.as_str())</dd></div>
+      </dl>
+    </details></li>
   })
 }
 
@@ -702,19 +702,27 @@ async fn load_workers(state: &AppState) -> Vec<WorkerView> {
           worker.systems.join(", ")
         },
         status_text:  if !worker.connected {
-          "offline"
+          "Offline"
         } else if worker.current_jobs > 0 {
-          "busy"
+          "Busy"
         } else {
-          "idle"
+          "Idle"
         },
         status_class: if !worker.connected {
           "skipped"
-        } else {
+        } else if worker.current_jobs > 0 {
           "running"
+        } else {
+          "succeeded"
         },
         current_jobs: worker.current_jobs,
         max_jobs:     worker.max_jobs,
+        cpu_count:    worker.cpu_count,
+        speed_factor: worker.speed_factor,
+        last_seen:    worker.last_seen.map_or_else(
+          || "Unknown".to_owned(),
+          |time| relative_time(time.as_second()),
+        ),
       }
     })
     .collect()
@@ -743,23 +751,38 @@ async fn build_activity_view(activity: &BuildActivity) -> Result<impl View> {
       } else {
         <ul class="simple-build-list">
           for build in &activity.builds {
-            <li>
-              <span class=(format!("simple-status {}", build.status_class)) aria-hidden="true"></span>
-              <div class="simple-build-main">
-                if build.has_log || matches!(build.status_text.as_str(), "Running" | "Pending") {
-                  <a href=(format!("/build/{}/log", build.id))><strong>(build.job_name.as_str())</strong></a>
-                } else {
-                  <strong>(build.job_name.as_str())</strong>
-                }
-                <span>(build.project_name.as_str()) " · " (build.system.as_str())</span>
-              </div>
-              <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
-            </li>
+            simple_build_row(details: build)
           }
         </ul>
       }
     </section>
   })
+}
+
+#[component]
+async fn simple_build_row(details: &BuildView) -> Result<impl View> {
+  Ok(view! {
+    <li><a class="simple-row-link simple-build-row" href=(format!("/build/{}/log", details.id))>
+      <div class="simple-build-main">
+        <strong title=(details.job_name.as_str())>(display_job_name(&details.job_name))</strong>
+        <span>
+          if !details.project_name.is_empty() {
+            (details.project_name.as_str()) " / "
+          }
+          (details.system.as_str())
+        </span>
+      </div>
+      <span class=(format!("simple-status-label {}", details.status_class))>(details.status_text.as_str())</span>
+    </a></li>
+  })
+}
+
+fn display_job_name(job: &str) -> &str {
+  job
+    .strip_prefix("drv:")
+    .and_then(|job| job.split_once('-'))
+    .filter(|(hash, name)| hash.len() == 32 && !name.is_empty())
+    .map_or(job, |(_, name)| name)
 }
 
 #[shard]
@@ -833,7 +856,6 @@ async fn effects_activity_view(
     <section class="simple-section" aria-labelledby="effects-heading">
       <div class="simple-section-heading">
         <h2 id="effects-heading">"Publishing effects"</h2>
-        <span class="simple-section-note">"Automatic or manual runs"</span>
       </div>
       if effects.is_empty() {
         <p class="simple-empty">"No publishing activity yet."</p>
