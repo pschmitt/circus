@@ -1,10 +1,11 @@
 use axum::{
   Router,
-  extract::{Path, State},
+  extract::{Path, Query, State},
   http::StatusCode,
   response::{IntoResponse, Response},
   routing::get,
 };
+use serde::Deserialize;
 
 use crate::{error::ApiError, state::AppState};
 
@@ -95,10 +96,17 @@ async fn build_badge(
   Ok(svg_response(shield_svg("build", label, color)))
 }
 
-/// Latest successful build redirect
+#[derive(Deserialize)]
+struct LatestBuildParams {
+  commit: Option<String>,
+}
+
+/// Look up a job, optionally restricted to a successful default-branch build
+/// for an exact commit.
 async fn latest_build(
   State(state): State<AppState>,
   Path((project_name, jobset_name, job_name)): Path<(String, String, String)>,
+  Query(params): Query<LatestBuildParams>,
 ) -> Result<Response, ApiError> {
   let project =
     circus_common::repo::projects::get_by_name(&state.pool, &project_name)
@@ -117,9 +125,25 @@ async fn latest_build(
     return Ok((StatusCode::NOT_FOUND, "Jobset not found").into_response());
   };
 
-  let eval =
+  let eval = if let Some(commit) = &params.commit {
+    let branch = jobset.branch.as_deref().unwrap_or("main");
+    let scope = format!("branch:{branch}");
+    circus_common::repo::evaluations::get_by_jobset_and_commit(
+      &state.pool,
+      jobset.id,
+      commit,
+    )
+    .await?
+    .filter(|eval| {
+      !eval.hidden
+        && !eval.is_pull_request()
+        && eval.source_scope.as_deref() == Some(scope.as_str())
+        && eval.status == circus_common::EvaluationStatus::Completed
+    })
+  } else {
     circus_common::repo::evaluations::get_latest(&state.pool, jobset.id)
-      .await?;
+      .await?
+  };
 
   let Some(eval) = eval else {
     return Ok((StatusCode::NOT_FOUND, "No evaluations found").into_response());
@@ -130,6 +154,17 @@ async fn latest_build(
       .await?;
 
   let build = builds.iter().find(|b| b.job_name == job_name);
+  if params.commit.is_some() {
+    return Ok(match build {
+      Some(build) if build.status == circus_common::BuildStatus::Succeeded => {
+        match &build.build_output_path {
+          Some(path) => axum::Json(path).into_response(),
+          None => StatusCode::NOT_FOUND.into_response(),
+        }
+      },
+      _ => StatusCode::NOT_FOUND.into_response(),
+    });
+  }
   build.map_or_else(
     || Ok((StatusCode::NOT_FOUND, "Build not found").into_response()),
     |b| Ok(axum::Json(b.clone()).into_response()),
