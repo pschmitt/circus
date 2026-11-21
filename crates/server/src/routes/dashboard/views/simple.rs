@@ -157,13 +157,13 @@ pub(in crate::routes::dashboard) async fn simple_page(
             <fieldset class="simple-tabs">
               <legend class="sr-only">"Dashboard sections"</legend>
               <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-activity" checked="checked">
-              <label for="tab-activity">"Activity"</label>
+              <label for="tab-activity"><span aria-hidden="true">"◷"</span>"Activity"</label>
               <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-repositories">
-              <label for="tab-repositories">"Repositories"</label>
+              <label for="tab-repositories"><span aria-hidden="true">"▣"</span>"Repositories"</label>
               <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-workers">
-              <label for="tab-workers">"Workers"</label>
+              <label for="tab-workers"><span aria-hidden="true">"⚙"</span>"Workers"</label>
               <input class="simple-tab-toggle" type="radio" name="dashboard-tab" id="tab-effects">
-              <label for="tab-effects">"Effects"</label>
+              <label for="tab-effects"><span aria-hidden="true">"✦"</span>"Effects"</label>
               <div class="simple-tab-panels">
                 <section class="simple-tab-panel" id="activity-panel" aria-label="Activity">
                   build_activity()

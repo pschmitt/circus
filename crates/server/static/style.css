@@ -318,10 +318,12 @@ pre {
 
 .simple-tab-toggle + label {
   position: relative;
-  display: grid;
+  display: flex;
   min-height: 44px;
   padding: 0 16px;
-  place-items: center;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   border-bottom: 2px solid transparent;
   color: var(--dash-muted);
   cursor: pointer;
