@@ -118,12 +118,20 @@ pub struct OperatorProject {
   pub last_eval_time:   String,
   pub failing_jobs:     i64,
   pub queued_jobs:      i64,
+  pub latest_running:   i64,
+  pub latest_queued:    i64,
+  pub latest_succeeded: i64,
+  pub latest_failed:    i64,
   pub systems:          String,
   pub updated_at:       String,
 }
 
 impl OperatorProject {
-  async fn list(state: &AppState, include_hidden: bool) -> Result<Vec<Self>> {
+  async fn list(
+    state: &AppState,
+    include_hidden: bool,
+    include_latest_job_statuses: bool,
+  ) -> Result<Vec<Self>> {
     let mut all_projects = Vec::new();
     let mut offset = 0;
     loop {
@@ -143,6 +151,10 @@ impl OperatorProject {
           .await
           .map_err(ApiError)?;
       let mut last_eval: Option<Evaluation> = None;
+      let mut latest_running = 0;
+      let mut latest_queued = 0;
+      let mut latest_succeeded = 0;
+      let mut latest_failed = 0;
       for js in &jobsets {
         let js_evals =
           circus_common::repo::evaluations::list_filtered_with_visibility(
@@ -155,12 +167,32 @@ impl OperatorProject {
           )
           .await
           .map_err(ApiError)?;
-        if let Some(e) = js_evals.into_iter().next()
-          && last_eval
+        let latest_for_jobset = js_evals.into_iter().next();
+        if let Some(evaluation) = latest_for_jobset {
+          if last_eval
             .as_ref()
-            .is_none_or(|le| e.evaluation_time > le.evaluation_time)
-        {
-          last_eval = Some(e);
+            .is_none_or(|le| evaluation.evaluation_time > le.evaluation_time)
+          {
+            last_eval = Some(evaluation.clone());
+          }
+          if include_latest_job_statuses {
+            for (status, count) in
+              circus_common::repo::builds::job_status_counts(
+                &state.pool,
+                evaluation.id,
+              )
+              .await
+              .map_err(ApiError)?
+            {
+              match status {
+                BuildStatus::Running => latest_running += count,
+                BuildStatus::Pending => latest_queued += count,
+                BuildStatus::Succeeded => latest_succeeded += count,
+                _ if status.badge().1 == "failed" => latest_failed += count,
+                _ => {},
+              }
+            }
+          }
         }
       }
       let (last_eval_status, last_eval_class, last_eval_time) =
@@ -194,6 +226,10 @@ impl OperatorProject {
         last_eval_time,
         failing_jobs,
         queued_jobs,
+        latest_running,
+        latest_queued,
+        latest_succeeded,
+        latest_failed,
         systems: if systems.is_empty() {
           "-".into()
         } else {
@@ -365,7 +401,7 @@ pub async fn overview(
     })
     .collect();
 
-  let projects = OperatorProject::list(state, include_hidden).await?;
+  let projects = OperatorProject::list(state, include_hidden, false).await?;
   let queue_by_system = OperatorQueueSystem::from_pending(&pending_raw, None);
   let (workers, worker_online, worker_total) =
     OperatorWorker::list(state).await?;
@@ -444,7 +480,20 @@ pub async fn projects(
   state: &AppState,
   include_hidden: bool,
 ) -> Result<Vec<OperatorProject>> {
-  OperatorProject::list(state, include_hidden).await
+  OperatorProject::list(state, include_hidden, false).await
+}
+
+/// Return project summaries with latest build-status counts for the
+/// read-only compact dashboard.
+///
+/// # Errors
+///
+/// Returns error when a project, jobset, evaluation, or build query fails.
+pub async fn projects_with_latest_status(
+  state: &AppState,
+  include_hidden: bool,
+) -> Result<Vec<OperatorProject>> {
+  OperatorProject::list(state, include_hidden, true).await
 }
 
 /// Return pending build counts grouped by target system.

@@ -51,6 +51,10 @@ pub fn router(
     .route("/", get_service(live.clone()))
     .route("/simple", get_service(build_live.clone()))
     .route(
+      "/simple/project/{simple_project_id}",
+      get_service(build_live.clone()),
+    )
+    .route(
       "/projects",
       get_service(live.clone()).post(admin::project_create),
     )

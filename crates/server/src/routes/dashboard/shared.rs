@@ -444,6 +444,10 @@ pub(super) struct ProjectSummaryView {
   pub(super) last_eval_time:   String,
   pub(super) failing_jobs:     i64,
   pub(super) queued_jobs:      i64,
+  pub(super) latest_running:   i64,
+  pub(super) latest_queued:    i64,
+  pub(super) latest_succeeded: i64,
+  pub(super) latest_failed:    i64,
   pub(super) systems:          String,
   pub(super) updated_at:       String,
 }
@@ -503,6 +507,10 @@ impl From<&operator::OperatorProject> for ProjectSummaryView {
       last_eval_time:   p.last_eval_time.clone(),
       failing_jobs:     p.failing_jobs,
       queued_jobs:      p.queued_jobs,
+      latest_running:   p.latest_running,
+      latest_queued:    p.latest_queued,
+      latest_succeeded: p.latest_succeeded,
+      latest_failed:    p.latest_failed,
       systems:          p.systems.clone(),
       updated_at:       p.updated_at.clone(),
     }

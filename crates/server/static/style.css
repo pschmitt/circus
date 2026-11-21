@@ -217,6 +217,12 @@ pre {
   letter-spacing: -0.03em;
 }
 
+.simple-wordmark img {
+  width: 30px;
+  height: 30px;
+  display: block;
+}
+
 .simple-header nav {
   display: flex;
   align-items: center;
@@ -244,6 +250,70 @@ pre {
   width: min(100% - 40px, 780px);
   margin: 0 auto;
   padding: 48px 0 36px;
+}
+
+.simple-tabs {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.simple-tabs legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.simple-tab-toggle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.simple-tab-toggle + label {
+  min-width: 0;
+  padding: 9px 5px;
+  border-bottom: 2px solid var(--border);
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.simple-tab-toggle:checked + label {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.simple-tab-toggle:focus-visible + label {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.simple-tab-panels {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.simple-tab-panel {
+  display: none;
+}
+
+#tab-activity:checked ~ .simple-tab-panels #activity-panel,
+#tab-repositories:checked ~ .simple-tab-panels #repositories-panel,
+#tab-workers:checked ~ .simple-tab-panels #workers-panel,
+#tab-effects:checked ~ .simple-tab-panels #effects-panel {
+  display: block;
 }
 
 .simple-title {
@@ -396,6 +466,18 @@ pre {
   color: var(--status-failed);
 }
 
+.simple-status-label.running {
+  color: var(--status-running);
+}
+
+.simple-status-label.queued {
+  color: var(--status-queued);
+}
+
+.simple-status-label.succeeded {
+  color: var(--status-success);
+}
+
 .simple-project-list,
 .simple-worker-list {
   list-style: none;
@@ -419,6 +501,51 @@ pre {
   gap: 3px;
 }
 
+.simple-project-title {
+  margin-top: 32px;
+  font-size: clamp(22px, 5vw, 30px);
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+  overflow-wrap: anywhere;
+}
+
+.simple-project-description {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.simple-project-jobs {
+  width: 100%;
+  min-width: 0;
+  list-style: none;
+  padding-left: 22px;
+}
+
+.simple-project-jobs li {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.simple-project-jobs a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simple-project-jobs li > span:last-child {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .simple-project-main strong,
 .simple-worker-main strong {
   overflow: hidden;
@@ -430,8 +557,7 @@ pre {
 .simple-project-main > span,
 .simple-worker-main > span,
 .simple-worker-jobs,
-.simple-project-health time,
-.simple-project-queued {
+.simple-project-health time {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -447,10 +573,6 @@ pre {
   white-space: nowrap;
 }
 
-.simple-project-queued {
-  white-space: nowrap;
-}
-
 .simple-empty {
   padding: 18px 0;
   color: var(--text-muted);
@@ -458,7 +580,7 @@ pre {
 }
 
 .simple-effect-list > li {
-  padding: 13px 0;
+  padding: 10px 0;
   border-top: 1px solid var(--border);
 }
 
@@ -470,7 +592,7 @@ pre {
 }
 
 .simple-effect-commit {
-  margin-bottom: 9px;
+  margin-bottom: 6px;
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -492,13 +614,54 @@ pre {
 }
 
 .simple-effect-row {
-  min-height: 26px;
-  padding-left: 1px;
+  width: 100%;
+  min-height: 58px;
+  padding: 10px 0 10px 1px;
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.simple-effect-row::-webkit-details-marker {
+  display: none;
+}
+
+.simple-effect-detail-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 12px;
+  padding: 4px 0 10px 18px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.simple-effect-detail-body code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+.simple-effect-detail-body p {
+  grid-column: 1 / -1;
   font-size: 13px;
 }
 
 .simple-effect-state-label {
   margin-left: auto;
+}
+
+.simple-offline-workers {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.simple-offline-workers summary {
+  padding: 12px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .simple-footer {
@@ -576,6 +739,24 @@ pre {
   }
 
   .simple-worker-jobs {
+    margin-left: 0;
+  }
+
+  .simple-tab-toggle + label {
+    padding-right: 2px;
+    padding-left: 2px;
+    font-size: 12px;
+  }
+
+  .simple-project-jobs {
+    padding-left: 0;
+  }
+
+  .simple-project-jobs li {
+    flex-wrap: wrap;
+  }
+
+  .simple-project-jobs li > span:last-child {
     margin-left: 0;
   }
 }
