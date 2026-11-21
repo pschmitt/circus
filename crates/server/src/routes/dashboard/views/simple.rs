@@ -426,6 +426,9 @@ pub(in crate::routes::dashboard) async fn build_activity(
   Ok(live! {
     loop {
       let token = emit! { build_activity_view(activity: &activity) }?;
+      if !topcoat::runtime::connected(cx) {
+        break Ok(token);
+      }
       tokio::select! {
         wake = changed.next(cx, DashboardPage::Home, false) => {
           match wake? {
@@ -488,6 +491,9 @@ pub(in crate::routes::dashboard) async fn repositories_activity(
   Ok(live! {
     loop {
       let token = emit! { repositories_view(projects: &projects) }?;
+      if !topcoat::runtime::connected(cx) {
+        break Ok(token);
+      }
       tokio::select! {
         wake = changed.next(cx, DashboardPage::Home, false) => {
           match wake? {
@@ -688,6 +694,9 @@ pub(in crate::routes::dashboard) async fn workers_activity(
   Ok(live! {
     loop {
       let token = emit! { workers_view(workers: &workers) }?;
+      if !topcoat::runtime::connected(cx) {
+        break Ok(token);
+      }
       tokio::time::sleep(std::time::Duration::from_secs(15)).await;
       if !topcoat::runtime::connected(cx) {
         break Ok(token);
@@ -929,7 +938,7 @@ async fn effects_activity_view(
       } else {
         <ul class="simple-effect-list">
           for snapshot in effects {
-            <li>
+            <li class="simple-effect-group">
               <div class="simple-effect-commit">
                 <span class="simple-commit-label">"Commit"</span>
                 <code>(short_commit(&snapshot.commit))</code>
