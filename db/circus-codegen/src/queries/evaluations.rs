@@ -261,25 +261,29 @@ impl<'a> From<EvaluationRowBorrowed<'a>> for EvaluationRow {
 pub struct ProjectEvaluationHistoryRow {
     pub project_id: uuid::Uuid,
     pub status: String,
-    pub evaluation_time: jiff::Timestamp,
+    pub finished: bool,
+    pub duration_seconds: Option<i64>,
 }
 pub struct ProjectEvaluationHistoryRowBorrowed<'a> {
     pub project_id: uuid::Uuid,
     pub status: &'a str,
-    pub evaluation_time: jiff::Timestamp,
+    pub finished: bool,
+    pub duration_seconds: Option<i64>,
 }
 impl<'a> From<ProjectEvaluationHistoryRowBorrowed<'a>> for ProjectEvaluationHistoryRow {
     fn from(
         ProjectEvaluationHistoryRowBorrowed {
             project_id,
             status,
-            evaluation_time,
+            finished,
+            duration_seconds,
         }: ProjectEvaluationHistoryRowBorrowed<'a>,
     ) -> Self {
         Self {
             project_id,
             status: status.into(),
-            evaluation_time,
+            finished,
+            duration_seconds,
         }
     }
 }
@@ -1118,7 +1122,7 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>
 pub struct ProjectHistoryStmt(&'static str, Option<tokio_postgres::Statement>);
 pub fn project_history() -> ProjectHistoryStmt {
     ProjectHistoryStmt(
-        "WITH recent AS ( SELECT j.project_id, e.id AS evaluation_id, e.status AS evaluation_status, e.evaluation_time, ROW_NUMBER() OVER ( PARTITION BY j.project_id ORDER BY e.evaluation_time DESC, e.id DESC ) AS rank FROM evaluations e JOIN jobsets j ON j.id = e.jobset_id WHERE j.project_id = ANY($1) AND ($2::boolean OR e.hidden = false) ) SELECT recent.project_id, CASE WHEN recent.evaluation_status IN ('failed', 'timed_out') OR COUNT(*) FILTER (WHERE b.status IN ( 'failed', 'dependency_failed', 'aborted', 'failed_with_output', 'timeout', 'cached_failure', 'unsupported_system', 'log_limit_exceeded', 'nar_size_limit_exceeded', 'non_deterministic', 'oom_killed' )) > 0 THEN 'failed' WHEN recent.evaluation_status = 'running' OR COUNT(*) FILTER (WHERE b.status = 'running') > 0 THEN 'running' WHEN recent.evaluation_status = 'pending' OR COUNT(*) FILTER (WHERE b.status = 'pending') > 0 THEN 'pending' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) > 0 AND COUNT(*) FILTER (WHERE b.status = 'succeeded') = COUNT(b.id) THEN 'succeeded' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) = 0 THEN 'no_builds' ELSE 'cancelled' END::text AS status, recent.evaluation_time FROM recent LEFT JOIN builds b ON b.evaluation_id = recent.evaluation_id WHERE recent.rank <= 12 GROUP BY recent.project_id, recent.evaluation_id, recent.evaluation_status, recent.evaluation_time ORDER BY recent.project_id, recent.evaluation_time ASC",
+        "WITH recent AS ( SELECT j.project_id, e.id AS evaluation_id, e.status AS evaluation_status, e.evaluation_time, e.finished_at, ROW_NUMBER() OVER ( PARTITION BY j.project_id ORDER BY e.evaluation_time DESC, e.id DESC ) AS rank FROM evaluations e JOIN jobsets j ON j.id = e.jobset_id WHERE j.project_id = ANY($1) AND ($2::boolean OR e.hidden = false) ) SELECT recent.project_id, CASE WHEN recent.evaluation_status IN ('failed', 'timed_out') OR COUNT(*) FILTER (WHERE b.status IN ( 'failed', 'dependency_failed', 'aborted', 'failed_with_output', 'timeout', 'cached_failure', 'unsupported_system', 'log_limit_exceeded', 'nar_size_limit_exceeded', 'non_deterministic', 'oom_killed' )) > 0 THEN 'failed' WHEN recent.evaluation_status = 'running' OR COUNT(*) FILTER (WHERE b.status = 'running') > 0 THEN 'running' WHEN recent.evaluation_status = 'pending' OR COUNT(*) FILTER (WHERE b.status = 'pending') > 0 THEN 'pending' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) > 0 AND COUNT(*) FILTER (WHERE b.status = 'succeeded') = COUNT(b.id) THEN 'succeeded' WHEN recent.evaluation_status = 'completed' AND COUNT(b.id) = 0 THEN 'no_builds' ELSE 'cancelled' END::text AS status, (recent.evaluation_status NOT IN ('pending', 'running') AND COUNT(*) FILTER (WHERE b.status IN ('pending', 'running')) = 0 ) AS finished, CASE WHEN recent.evaluation_status NOT IN ('pending', 'running') AND COUNT(*) FILTER (WHERE b.status IN ('pending', 'running')) = 0 THEN FLOOR(EXTRACT(EPOCH FROM ( GREATEST(recent.finished_at, MAX(b.completed_at)) - recent.evaluation_time )))::bigint END AS duration_seconds FROM recent LEFT JOIN builds b ON b.evaluation_id = recent.evaluation_id WHERE recent.rank <= 12 GROUP BY recent.project_id, recent.evaluation_id, recent.evaluation_status, recent.evaluation_time, recent.finished_at ORDER BY recent.project_id, recent.evaluation_time ASC, recent.evaluation_id ASC",
         None,
     )
 }
@@ -1147,7 +1151,8 @@ impl ProjectHistoryStmt {
                 Ok(ProjectEvaluationHistoryRowBorrowed {
                     project_id: row.try_get(0)?,
                     status: row.try_get(1)?,
-                    evaluation_time: row.try_get(2)?,
+                    finished: row.try_get(2)?,
+                    duration_seconds: row.try_get(3)?,
                 })
             },
             mapper: |it| ProjectEvaluationHistoryRow::from(it),

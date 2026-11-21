@@ -71,14 +71,32 @@ struct SimpleQuery {
 }
 
 struct SimpleProjectView {
-  summary:       ProjectSummaryView,
-  history:       Vec<EvaluationHistoryPoint>,
-  history_label: String,
+  summary:         ProjectSummaryView,
+  history:         Vec<EvaluationHistoryPoint>,
+  median_duration: String,
+  pass_rate:       String,
+  status_text:     &'static str,
+  status_class:    &'static str,
+  status_icon:     &'static str,
 }
 
 struct EvaluationHistoryPoint {
-  status_text:  &'static str,
-  status_class: &'static str,
+  status_text:      &'static str,
+  status_class:     &'static str,
+  duration_seconds: Option<i64>,
+  height_percent:   i64,
+  finished:         bool,
+}
+
+impl EvaluationHistoryPoint {
+  fn label(&self) -> String {
+    match self.duration_seconds {
+      Some(seconds) => {
+        format!("{}, {}", self.status_text, duration_label(seconds))
+      },
+      None => self.status_text.to_owned(),
+    }
+  }
 }
 
 struct WorkerView {
@@ -528,31 +546,83 @@ async fn load_projects(
       .push(EvaluationHistoryPoint {
         status_text,
         status_class,
+        duration_seconds: evaluation
+          .duration_seconds
+          .filter(|seconds| *seconds >= 0),
+        height_percent: 0,
+        finished: evaluation.finished,
       });
   }
 
   projects
     .into_iter()
     .map(|summary| {
-      let history =
+      let mut history =
         histories_by_project.remove(&summary.id).unwrap_or_default();
-      let history_label = if history.is_empty() {
-        "No recent evaluations".to_owned()
+      let mut durations: Vec<_> = history
+        .iter()
+        .filter_map(|point| point.duration_seconds)
+        .collect();
+      durations.sort_unstable();
+      let median_duration = if durations.is_empty() {
+        "—".to_owned()
       } else {
-        let labels = history
-          .iter()
-          .map(|point| point.status_text)
-          .collect::<Vec<_>>()
-          .join(", ");
-        format!("Recent evaluations, oldest to newest: {labels}")
+        let middle = durations.len() / 2;
+        let left = durations[(durations.len() - 1) / 2];
+        duration_label(left + (durations[middle] - left) / 2)
+      };
+      let passed = history
+        .iter()
+        .filter(|point| point.status_class == "succeeded")
+        .count();
+      let failed = history
+        .iter()
+        .filter(|point| point.status_class == "failed" && point.finished)
+        .count();
+      let decided = passed + failed;
+      let pass_rate = if decided == 0 {
+        "—".to_owned()
+      } else {
+        format!("{}%", (100 * passed + decided / 2) / decided)
+      };
+      let max_duration = durations.last().copied().unwrap_or(1).max(1);
+      for point in &mut history {
+        point.height_percent = point
+          .duration_seconds
+          .map_or(0, |seconds| seconds.saturating_mul(100) / max_duration);
+      }
+      let (status_text, status_class) =
+        history.last().map_or(("No evaluation", ""), |point| {
+          (point.status_text, point.status_class)
+        });
+      let status_icon = match status_class {
+        "succeeded" => "✓",
+        "failed" => "×",
+        "running" => "↻",
+        "pending" => "…",
+        _ => "–",
       };
       SimpleProjectView {
+        status_text,
+        status_class,
+        status_icon,
         summary,
         history,
-        history_label,
+        median_duration,
+        pass_rate,
       }
     })
     .collect()
+}
+
+fn duration_label(seconds: i64) -> String {
+  if seconds >= 3600 {
+    format!("{}h {}m", seconds / 3600, seconds / 60 % 60)
+  } else if seconds >= 60 {
+    format!("{}m {}s", seconds / 60, seconds % 60)
+  } else {
+    format!("{seconds}s")
+  }
 }
 
 #[component]
@@ -571,38 +641,35 @@ async fn repositories_view(
         <ul class="simple-project-list">
           for project in projects {
             <li><a class="simple-row-link simple-repo-row" href=(format!("/dash/project/{}", project.summary.id))>
+              <span class=(format!("simple-project-icon {}", project.status_class)) role="img" aria-label=(project.status_text) title=(project.status_text)>(project.status_icon)</span>
               <div class="simple-project-main">
                 <strong>(project.summary.name.as_str())</strong>
                 <span>(project.summary.systems.as_str())</span>
-              </div>
-              <div class="simple-history-column">
-                if project.history.is_empty() {
-                  <span class="simple-history-empty" aria-label=(project.history_label.as_str())>"No history"</span>
-                } else {
-                  <span class="simple-project-history" role="img" aria-label=(project.history_label.as_str())>
-                    for point in &project.history {
-                      <span class=(format!("simple-history-point {}", point.status_class)) title=(point.status_text) aria-hidden="true"></span>
-                    }
-                  </span>
-                }
-              </div>
-              <div class="simple-project-health">
-                if project.summary.latest_running > 0 {
-                  <span class="simple-status-label running">"Building " (project.summary.latest_running)</span>
-                }
-                if project.summary.latest_queued > 0 {
-                  <span class="simple-status-label queued">"Queued " (project.summary.latest_queued)</span>
-                }
-                if project.summary.latest_succeeded > 0 {
-                  <span class="simple-status-label succeeded">"Succeeded " (project.summary.latest_succeeded)</span>
-                }
-                if project.summary.latest_failed > 0 {
-                  <span class="simple-status-label failed">"Failed " (project.summary.latest_failed)</span>
-                }
                 if !project.summary.last_eval_time.is_empty() {
                   <time>(project.summary.last_eval_time.as_str())</time>
                 }
               </div>
+              <div class="simple-history-column">
+                if project.history.is_empty() {
+                  <span class="simple-history-empty">"No history"</span>
+                } else {
+                  <ol class="simple-project-history" aria-label="Recent evaluations, oldest first">
+                    for point in &project.history {
+                      <li class=(format!("simple-history-point {}", point.status_class))
+                          style=(format!("--history-height: {}%", point.height_percent))
+                          aria-label=(point.label()) title=(point.label())></li>
+                    }
+                  </ol>
+                }
+              </div>
+              <dl class="simple-project-stats">
+                <div title="Median elapsed time of recent evaluations with recorded durations">
+                  <dt>"Median duration"</dt><dd>(project.median_duration.as_str())</dd>
+                </div>
+                <div title="Share of recently completed evaluations with a success or failure outcome that succeeded">
+                  <dt>"Pass rate"</dt><dd>(project.pass_rate.as_str())</dd>
+                </div>
+              </dl>
             </a></li>
           }
         </ul>

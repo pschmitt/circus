@@ -382,8 +382,10 @@ pub async fn list_filtered_with_visibility(
 /// One point in the recent evaluation history for a project.
 #[derive(Debug, Clone)]
 pub struct ProjectEvaluationHistory {
-  pub project_id: Uuid,
-  pub status:     String,
+  pub project_id:       Uuid,
+  pub status:           String,
+  pub duration_seconds: Option<i64>,
+  pub finished:         bool,
 }
 
 /// Fetch up to twelve visible recent evaluations for each project in one query.
@@ -411,8 +413,10 @@ pub async fn project_history(
       .into_iter()
       .map(|row| {
         ProjectEvaluationHistory {
-          project_id: row.project_id,
-          status:     row.status,
+          project_id:       row.project_id,
+          status:           row.status,
+          duration_seconds: row.duration_seconds,
+          finished:         row.finished,
         }
       })
       .collect(),

@@ -1,5 +1,5 @@
 --: EvaluationRow(error_message?, inputs_hash?, pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, started_at?, source_scope?, superseded_by?, source_base_commit?, finished_at?, commit_subject?, attrs_done?, attrs_total?)
---: ProjectEvaluationHistoryRow()
+--: ProjectEvaluationHistoryRow(duration_seconds?)
 
 --! create_with_kind (pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, source_scope?, source_base_commit?) : EvaluationRow
 INSERT INTO evaluations (
@@ -40,6 +40,7 @@ WITH recent AS (
     e.id AS evaluation_id,
     e.status AS evaluation_status,
     e.evaluation_time,
+    e.finished_at,
     ROW_NUMBER() OVER (
       PARTITION BY j.project_id
       ORDER BY e.evaluation_time DESC, e.id DESC
@@ -70,13 +71,22 @@ SELECT
       THEN 'no_builds'
     ELSE 'cancelled'
   END::text AS status,
-  recent.evaluation_time
+  (recent.evaluation_status NOT IN ('pending', 'running')
+    AND COUNT(*) FILTER (WHERE b.status IN ('pending', 'running')) = 0
+  ) AS finished,
+  CASE
+    WHEN recent.evaluation_status NOT IN ('pending', 'running')
+      AND COUNT(*) FILTER (WHERE b.status IN ('pending', 'running')) = 0
+    THEN FLOOR(EXTRACT(EPOCH FROM (
+      GREATEST(recent.finished_at, MAX(b.completed_at)) - recent.evaluation_time
+    )))::bigint
+  END AS duration_seconds
 FROM recent
 LEFT JOIN builds b ON b.evaluation_id = recent.evaluation_id
 WHERE recent.rank <= 12
 GROUP BY recent.project_id, recent.evaluation_id,
-  recent.evaluation_status, recent.evaluation_time
-ORDER BY recent.project_id, recent.evaluation_time ASC;
+  recent.evaluation_status, recent.evaluation_time, recent.finished_at
+ORDER BY recent.project_id, recent.evaluation_time ASC, recent.evaluation_id ASC;
 
 --! count_filtered_with_visibility (jobset_id?, status?)
 SELECT COUNT(*) FROM evaluations
