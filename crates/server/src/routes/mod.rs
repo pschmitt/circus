@@ -57,6 +57,7 @@ use crate::{
 };
 
 static STYLE_CSS: &str = include_str!("../../static/style.css");
+static FAVICON: &str = include_str!("../../static/favicon.svg");
 
 pub(crate) async fn canonical_log_file(
   log_dir: &Path,
@@ -353,6 +354,10 @@ pub fn ui_router(
   if config.ui.assets_enabled() {
     router = router
       .route("/static/style.css", get(serve_style_css))
+      .route(
+        "/static/favicon.svg",
+        get(|| async { ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON) }),
+      )
       .route("/static/theme.css", get(serve_theme_css));
 
     if config.ui.custom_css.is_some() {

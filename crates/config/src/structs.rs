@@ -151,8 +151,8 @@ pub struct UiConfig {
   /// Optional logo URL. Use `/static/custom/<file>` with `static_dir` for
   /// self-hosted logos.
   pub logo_url:       Option<String>,
-  /// Optional favicon URL. Use `/static/custom/<file>` with `static_dir` for
-  /// self-hosted favicons.
+  /// Favicon URL. Defaults to the bundled Circus icon. Use
+  /// `/static/custom/<file>` with `static_dir` for a custom icon.
   pub favicon_url:    Option<String>,
   /// Optional CSS file served at `/static/custom.css` after bundled styles.
   pub custom_css:     Option<PathBuf>,
@@ -966,7 +966,7 @@ impl Default for UiConfig {
       brand_name:     "circus".to_string(),
       brand_subtitle: "Nix CI".to_string(),
       logo_url:       None,
-      favicon_url:    None,
+      favicon_url:    Some("/static/favicon.svg".to_string()),
       custom_css:     None,
       static_dir:     None,
       css_variables:  BTreeMap::new(),
