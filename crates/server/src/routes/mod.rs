@@ -58,6 +58,8 @@ use crate::{
 
 static STYLE_CSS: &str = include_str!("../../static/style.css");
 static FAVICON: &str = include_str!("../../static/favicon.svg");
+static BUILD_LOG_STREAM_JS: &str =
+  include_str!("../../static/build-log-stream.js");
 
 pub(crate) async fn canonical_log_file(
   log_dir: &Path,
@@ -152,6 +154,14 @@ async fn serve_style_css() -> Response {
       .expect("response builder should not fail")
   }
   .into_response()
+}
+
+async fn serve_build_log_stream_js() -> Response {
+  Response::builder()
+    .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
+    .header(header::CACHE_CONTROL, "no-cache")
+    .body(Body::from(BUILD_LOG_STREAM_JS))
+    .expect("response builder should not fail")
 }
 
 async fn serve_theme_css(State(state): State<AppState>) -> Response {
@@ -354,6 +364,10 @@ pub fn ui_router(
   if config.ui.assets_enabled() {
     router = router
       .route("/static/style.css", get(serve_style_css))
+      .route(
+        "/static/build-log-stream.js",
+        get(serve_build_log_stream_js),
+      )
       .route(
         "/static/favicon.svg",
         get(|| async { ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON) }),

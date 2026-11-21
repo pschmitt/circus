@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::Path};
 
 use circus_common::{
   log_storage::read_log_file,
-  models::{BuildProduct, NewsItem},
+  models::{BuildProduct, BuildStatus, NewsItem},
 };
 use topcoat::{
   Result,
@@ -1305,21 +1305,27 @@ pub(in crate::routes::dashboard) async fn build_log_page(
   .ok()
   .ok_or_not_found()?;
   let lineage = lineage(state, build.evaluation_id).await?;
-  let path = build
-    .log_path
-    .as_deref()
-    .filter(|path| !path.is_empty())
-    .ok_or_not_found()?;
-  let path = crate::routes::canonical_log_file(
-    &state.config.logs.log_dir,
-    Path::new(path),
-  )
-  .await
-  .ok_or_not_found()?;
-  let raw = read_log_file(&path).await.ok().ok_or_not_found()?;
-  let log = parse_build_log(&raw);
-  let build = build_view(&build);
   let simple = app_context::<BuildPresentation>(cx).simple;
+  let log_path = build.log_path.as_deref().filter(|path| !path.is_empty());
+  let live = simple
+    && matches!(build.status, BuildStatus::Pending | BuildStatus::Running)
+    && log_path.is_none();
+  let log = if let Some(path) = log_path {
+    let path = crate::routes::canonical_log_file(
+      &state.config.logs.log_dir,
+      Path::new(path),
+    )
+    .await
+    .ok_or_not_found()?;
+    let raw = read_log_file(&path).await.ok().ok_or_not_found()?;
+    Some(parse_build_log(&raw))
+  } else if live {
+    None
+  } else {
+    None::<BuildLogView>.ok_or_not_found()?;
+    unreachable!("missing log is returned as not found")
+  };
+  let build = build_view(&build);
   let title = format!("Log {}", build.job_name);
 
   Ok(view! {
@@ -1331,7 +1337,11 @@ pub(in crate::routes::dashboard) async fn build_log_page(
             <a href="/" aria-label="Return to builds">"← All builds"</a>
           </header>
           <main class="simple-content">
-            log_page(details: &build, log: log, simple: true)
+            if let Some(log) = log {
+              log_page(details: &build, log: log, simple: true)
+            } else {
+              live_log_page(details: &build, id: id)
+            }
           </main>
         </section>
       } else {
@@ -1349,10 +1359,31 @@ pub(in crate::routes::dashboard) async fn build_log_page(
             <span class="sep">"/"</span>
             <span class="current">"Log"</span>
           </nav>
-          log_page(details: &build, log: log, simple: false)
+          if let Some(log) = log {
+            log_page(details: &build, log: log, simple: false)
+          } else {
+            live_log_page(details: &build, id: id)
+          }
         </div>
       }
     )
+  })
+}
+
+#[component]
+async fn live_log_page(details: &BuildView, id: Uuid) -> Result<impl View> {
+  let stream_url = format!("/api/v1/builds/{id}/log/stream");
+
+  Ok(view! {
+    <section class="log-stream live-build-log" aria-label="Live build log">
+      <div class="log-pane-header">
+        <h2>"Live log stream"</h2>
+        <span class=(format!("status status-{}", details.status_class))>(details.status_text.clone())</span>
+      </div>
+      <p class="live-log-status" data-build-log-status="">"Connecting to build log…"</p>
+      <pre class="log-live-lines" data-build-log-stream=(stream_url) aria-live="polite"></pre>
+      <script src="/static/build-log-stream.js" defer="defer"></script>
+    </section>
   })
 }
 
