@@ -360,7 +360,7 @@ async fn handle_pull_request(
 
   let action = payload.action.as_deref().unwrap_or("");
 
-  if !matches!(action, "opened" | "synchronize" | "reopened") {
+  if !is_supported_pull_request_action(action) {
     return Ok((
       StatusCode::OK,
       Json(WebhookResponse {
@@ -379,6 +379,21 @@ async fn handle_pull_request(
       }),
     ));
   };
+
+  if !should_evaluate_pull_request_action(action, pr.draft) {
+    let message = if pr.draft.unwrap_or(false) {
+      "Draft pull request, skipping".to_string()
+    } else {
+      "Pull request draft status missing, skipping".to_string()
+    };
+    return Ok((
+      StatusCode::OK,
+      Json(WebhookResponse {
+        accepted: true,
+        message,
+      }),
+    ));
+  }
 
   if pr.draft.unwrap_or(false) {
     return Ok((
@@ -437,11 +452,44 @@ async fn handle_pull_request(
   ))
 }
 
+fn is_supported_pull_request_action(action: &str) -> bool {
+  matches!(
+    action,
+    "opened" | "synchronize" | "reopened" | "ready_for_review"
+  )
+}
+
+fn should_evaluate_pull_request_action(
+  action: &str,
+  draft: Option<bool>,
+) -> bool {
+  matches!(action, "opened" | "synchronize" | "reopened")
+    || (action == "ready_for_review" && draft == Some(false))
+}
+
 #[cfg(test)]
 mod tests {
   #![expect(clippy::unwrap_used, reason = "Fine in tests")]
 
   use super::*;
+
+  #[test]
+  fn test_ready_for_review_only_triggers_for_confirmed_non_draft_prs() {
+    assert!(is_supported_pull_request_action("ready_for_review"));
+    assert!(should_evaluate_pull_request_action(
+      "ready_for_review",
+      Some(false)
+    ));
+    assert!(!should_evaluate_pull_request_action(
+      "ready_for_review",
+      Some(true)
+    ));
+    assert!(!should_evaluate_pull_request_action(
+      "ready_for_review",
+      None
+    ));
+    assert!(!is_supported_pull_request_action("closed"));
+  }
 
   #[test]
   fn test_parse_github_push_payload() {

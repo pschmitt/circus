@@ -94,7 +94,12 @@ const ORPHAN_SWEEP_SLACK_SECS: f64 = 300.0;
 /// after claiming them. No live evaluation can outlast the git plus nix
 /// timeouts, so anything older is unowned. Also unwedges the duplicate-poll
 /// skip that a stranded row otherwise holds forever.
-async fn sweep_orphaned_evaluations(pool: &PgPool, worst_case: Duration) {
+async fn sweep_orphaned_evaluations(
+  pool: &PgPool,
+  worst_case: Duration,
+  notifications_config: &NotificationsConfig,
+  notification_secret_key: Option<&str>,
+) {
   let deadline_secs = worst_case.as_secs_f64() + ORPHAN_SWEEP_SLACK_SECS;
   match repo::evaluations::sweep_orphaned(pool, deadline_secs).await {
     Ok(swept) => {
@@ -106,6 +111,15 @@ async fn sweep_orphaned_evaluations(pool: &PgPool, worst_case: Duration) {
           status = eval.status.as_db_str(),
           "Recovered orphaned evaluation"
         );
+        if eval.status == EvaluationStatus::Failed && eval.pr_number.is_some() {
+          circus_notification::dispatch_evaluation_update(
+            pool,
+            eval.id,
+            notifications_config,
+            notification_secret_key,
+          )
+          .await;
+        }
       }
     },
     Err(e) => {
@@ -122,7 +136,13 @@ async fn run_cycle(
   nix_timeout: Duration,
   git_timeout: Duration,
 ) -> misstep::Result<()> {
-  sweep_orphaned_evaluations(pool, git_timeout + nix_timeout).await;
+  sweep_orphaned_evaluations(
+    pool,
+    git_timeout + nix_timeout,
+    notifications_config,
+    notification_secret_key,
+  )
+  .await;
 
   let active = repo::jobsets::list_active(pool).await?;
   let active_by_id: HashMap<Uuid, ActiveJobset> =
