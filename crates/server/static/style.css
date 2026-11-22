@@ -550,6 +550,15 @@ pre {
   line-height: 1;
 }
 
+.simple-project-icon.pending::before {
+  content: "";
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: -4px 0 currentColor, 4px 0 currentColor;
+}
+
 .simple-project-main time {
   font-size: 11px;
   font-variant-numeric: tabular-nums;

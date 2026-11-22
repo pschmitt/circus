@@ -682,7 +682,7 @@ async fn load_projects(
         "succeeded" => "✓",
         "failed" => "×",
         "running" => "↻",
-        "pending" => "…",
+        "pending" => "",
         _ => "–",
       };
       SimpleProjectView {
