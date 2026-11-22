@@ -47,6 +47,20 @@ fn result_error_message(
     .map(std::borrow::ToOwned::to_owned)
 }
 
+// Upload errors may contain presigned URLs. Never persist the agent's raw
+// message; retain only a fixed stage name for diagnosis.
+fn upload_failure_message(message: Option<&str>) -> String {
+  let stage = message.and_then(|message| {
+    ["path-info", "presign", "upload", "notify"]
+      .into_iter()
+      .find(|stage| message.contains(&format!("{stage}:")))
+  });
+  match stage {
+    Some(stage) => format!("agent cache upload failed at {stage}"),
+    None => "agent cache upload failed".to_owned(),
+  }
+}
+
 #[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl result_sink::Server for ResultSinkImpl {
   fn report(
@@ -74,11 +88,17 @@ impl result_sink::Server for ResultSinkImpl {
         },
         BuildOutcome::PreparingFailure
         | BuildOutcome::ImportFailure
-        | BuildOutcome::UploadFailure
         | BuildOutcome::PostProcessFailure
         | BuildOutcome::InfraFailure => {
           BuildOutcomeKind::InfraFailure {
             error_message: result_error_message(r),
+          }
+        },
+        BuildOutcome::UploadFailure => {
+          BuildOutcomeKind::InfraFailure {
+            error_message: Some(upload_failure_message(
+              result_error_message(r).as_deref(),
+            )),
           }
         },
         BuildOutcome::TransientFailure => {
@@ -123,5 +143,23 @@ impl result_sink::Server for ResultSinkImpl {
       let _ = tx.send(kind);
       Ok(())
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::upload_failure_message;
+
+  #[test]
+  fn upload_errors_never_include_agent_details() {
+    assert_eq!(
+      upload_failure_message(Some("upload failures: [path -> upload: https://example.invalid/?secret=value]")),
+      "agent cache upload failed at upload"
+    );
+    assert_eq!(
+      upload_failure_message(Some("unexpected credential=value")),
+      "agent cache upload failed"
+    );
+    assert_eq!(upload_failure_message(None), "agent cache upload failed");
   }
 }
