@@ -139,6 +139,7 @@ FROM eligible_pending b
 JOIN evaluations e ON b.evaluation_id = e.id
 JOIN active_shares ash ON ash.jobset_id = e.jobset_id
 ORDER BY
+  COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC,
   b.priority DESC,
   cardinality(COALESCE(b.effective_features, b.required_features)) DESC,
   (ash.scheduling_shares::float / GREATEST(ash.total_shares, 1)
@@ -220,12 +221,13 @@ WHERE id = :id
 RETURNING *;
 
 --! list_pending_in_scheduler_order (system?, job_name?) : BuildRow
-SELECT *
-FROM builds
+SELECT b.*
+FROM builds b
 WHERE status = 'pending'
   AND (:system::text IS NULL OR system = :system)
   AND (:job_name::text IS NULL OR job_name ILIKE '%' || :job_name || '%')
 ORDER BY
+  COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC,
   priority DESC,
   cardinality(COALESCE(effective_features, required_features)) DESC,
   created_at ASC,
@@ -233,9 +235,11 @@ ORDER BY
 LIMIT :limit OFFSET :offset;
 
 --! list_pending_for_systems : BuildRow
-SELECT * FROM builds
+SELECT b.* FROM builds b
 WHERE status = 'pending' AND system = ANY(:systems)
-ORDER BY priority DESC, created_at ASC
+ORDER BY
+  COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC,
+  priority DESC, created_at ASC
 LIMIT 512;
 
 --! pending_feature_demand

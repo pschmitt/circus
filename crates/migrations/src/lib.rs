@@ -78,6 +78,7 @@ const MIGRATIONS: &[Migration] = migrations![
   (56, "0056_jobset_build_timeout"),
   (57, "0057_evaluation_jobset_time_index"),
   (58, "0058_evaluation_snapshots"),
+  (59, "0059_snapshot_scheduling"),
 ];
 
 /// Runs all migrations, creating the database first if it doesn't exist.

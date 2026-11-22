@@ -136,10 +136,23 @@ async fn snapshot_persists_request_with_evaluation() {
   };
   let project = create_test_project(&pool, "snapshot").await;
   let jobset = create_test_jobset(&pool, project.id).await;
+  let ordinary = create_test_eval(&pool, jobset.id).await;
   let id = uuid::Uuid::new_v4().simple().to_string();
   let hosts = vec!["phone".to_string()];
+  let scheduling = repo::evaluations::SnapshotScheduling {
+    pool:  Some("gha-aarch64-linux".to_owned()),
+    agent: None,
+    front: true,
+  };
   let evaluation = repo::evaluations::create_snapshot(
-    &pool, jobset.id, &id, b"archive", &hosts, true, 10,
+    &pool,
+    jobset.id,
+    &id,
+    b"archive",
+    &hosts,
+    true,
+    10,
+    &scheduling,
   )
   .await
   .expect("create snapshot");
@@ -153,6 +166,46 @@ async fn snapshot_persists_request_with_evaluation() {
   assert_eq!(snapshot.hosts, hosts);
   assert!(snapshot.termuxpp);
   assert_eq!(snapshot.priority, 10);
+  let stored = repo::evaluations::snapshot_scheduling(&pool, evaluation.id)
+    .await
+    .expect("load preferences");
+  assert_eq!(stored.pool, scheduling.pool);
+  assert!(stored.front);
+  let pending = repo::evaluations::list_pending(&pool)
+    .await
+    .expect("pending evaluations");
+  let ids: Vec<_> = pending
+    .into_iter()
+    .filter(|row| row.jobset_id == jobset.id)
+    .map(|row| row.id)
+    .collect();
+  assert_eq!(ids, [evaluation.id, ordinary.id]);
+  let ordinary_build = create_test_build(
+    &pool,
+    ordinary.id,
+    "ordinary",
+    "/nix/store/ordinary.drv",
+    Some("x86_64-linux"),
+  )
+  .await;
+  let preferred_build = create_test_build(
+    &pool,
+    evaluation.id,
+    "phone",
+    "/nix/store/phone.drv",
+    Some("x86_64-linux"),
+  )
+  .await;
+  repo::builds::bump_priority(&pool, ordinary_build.id, 1000)
+    .await
+    .expect("bump ordinary build");
+  let pending: Vec<_> = list_pending_x86(&pool, 512, 2)
+    .await
+    .into_iter()
+    .filter(|build| [ordinary.id, evaluation.id].contains(&build.evaluation_id))
+    .map(|build| build.id)
+    .collect();
+  assert_eq!(pending, [preferred_build.id, ordinary_build.id]);
 }
 
 /// Helper: create an evaluation for a jobset.

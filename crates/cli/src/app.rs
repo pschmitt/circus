@@ -553,18 +553,25 @@ impl CommandRunner {
         hosts,
         checkout,
         termuxpp,
+        pool,
+        agent,
+        front,
         normal_priority,
       } => {
         let archive = tokio::task::spawn_blocking(move || {
           crate::snapshot::archive_checkout(&checkout)
         })
         .await??;
-        let path = with_query("api/v1/evaluations/snapshot", &[
+        let mut params = vec![
           ("jobset_id", jobset_id.to_string()),
           ("hosts", hosts),
           ("termuxpp", termuxpp.to_string()),
           ("normal_priority", normal_priority.to_string()),
-        ]);
+          ("front", front.to_string()),
+        ];
+        push_optional(&mut params, "pool", pool);
+        push_optional(&mut params, "agent", agent.map(|id| id.to_string()));
+        let path = with_query("api/v1/evaluations/snapshot", &params);
         let response = self.api.post_archive(&path, archive).await?;
         if self.json_output {
           return print_json(&response);

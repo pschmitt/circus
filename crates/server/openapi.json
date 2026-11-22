@@ -1250,6 +1250,24 @@
             "schema": { "type": "boolean", "default": false }
           },
           {
+            "name": "pool",
+            "in": "query",
+            "description": "Preferred ephemeral pool name",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "description": "Preferred registered agent machine ID",
+            "schema": { "$ref": "#/components/schemas/Uuid" }
+          },
+          {
+            "name": "front",
+            "in": "query",
+            "description": "Place the snapshot ahead of ordinary queued work",
+            "schema": { "type": "boolean", "default": false }
+          },
+          {
             "name": "normal_priority",
             "in": "query",
             "schema": { "type": "boolean", "default": false }

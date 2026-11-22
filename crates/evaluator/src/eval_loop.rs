@@ -315,14 +315,18 @@ fn group_by_project<T>(
   items: Vec<T>,
   project_name: impl Fn(&T) -> &str,
 ) -> Vec<Vec<T>> {
-  let mut groups: HashMap<String, Vec<T>> = HashMap::new();
+  let mut positions = HashMap::new();
+  let mut groups: Vec<Vec<T>> = Vec::new();
   for item in items {
-    groups
+    let index = *positions
       .entry(project_name(&item).to_owned())
-      .or_default()
-      .push(item);
+      .or_insert_with(|| {
+        groups.push(Vec::new());
+        groups.len() - 1
+      });
+    groups[index].push(item);
   }
-  groups.into_values().collect()
+  groups
 }
 
 fn accepts_pending_evaluation(

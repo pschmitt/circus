@@ -262,18 +262,42 @@ pub async fn reserve_venue(
 ) -> Option<ExecutionReservation> {
   static AGENT_RECHECK: Mutex<()> = Mutex::const_new(());
 
+  let preference = if build.is_dependency() {
+    repo::evaluations::SnapshotScheduling::default()
+  } else {
+    repo::evaluations::snapshot_scheduling(&ctx.pool, build.evaluation_id)
+      .await
+      .unwrap_or_else(|error| {
+        tracing::warn!(%error, evaluation_id = %build.evaluation_id,
+          "Could not read snapshot scheduling preference");
+        Default::default()
+      })
+  };
+  // Give a cold ephemeral pool time to start a compatible runner. An exact
+  // agent preference can fall back immediately when the agent has no capacity.
+  const POOL_START_GRACE_SECS: i64 = 120;
+  let wait_for_pool = preference.pool.is_some()
+    && jiff::Timestamp::now()
+      .as_second()
+      .saturating_sub(build.created_at.as_second())
+      < POOL_START_GRACE_SECS;
   let features = build.scheduling_features();
-  let local = ctx
-    .runner_caps
-    .supports(system, features)
+  let local = (!wait_for_pool && ctx.runner_caps.supports(system, features))
     .then(|| Arc::clone(&ctx.worker_semaphore));
   let venue = wait_for_venue(
     &AGENT_CAPACITY_CHANGED,
     &AGENT_RECHECK,
     || {
+      let preference = &preference;
       async move {
-        let (meta, snap, slot) =
-          select_and_reserve_agent(ctx, build, system?).await?;
+        let (meta, snap, slot) = select_and_reserve_agent(
+          ctx,
+          build,
+          system?,
+          preference,
+          wait_for_pool,
+        )
+        .await?;
         Some(ExecutionReservation::Agent {
           meta,
           snap: Box::new(snap),
@@ -349,6 +373,8 @@ async fn select_and_reserve_agent(
   ctx: &BuildContext,
   build: &Build,
   system: &str,
+  preference: &repo::evaluations::SnapshotScheduling,
+  wait_for_pool: bool,
 ) -> Option<(Arc<AgentMeta>, AgentSnapshot, SlotGuard)> {
   let mut candidates = ctx.agent_pool.candidates_for(system);
   if candidates.is_empty() {
@@ -372,8 +398,10 @@ async fn select_and_reserve_agent(
     });
   }
 
-  candidates
-    .retain(|(_, snap)| snap.supports_features(build.scheduling_features()));
+  candidates.retain(|(_, snap)| {
+    snap.supports_features(build.scheduling_features())
+      && (!wait_for_pool || preferred_snapshot_agent(preference, snap))
+  });
   if candidates.is_empty() {
     return None;
   }
@@ -520,8 +548,9 @@ async fn select_and_reserve_agent(
       .is_some_and(|(overflow, _)| is_qemu_overflow_agent(&b.1.name, overflow));
     let sa = a.1.contended_surplus(build.scheduling_features(), &demand);
     let sb = b.1.contended_surplus(build.scheduling_features(), &demand);
-    a_is_overflow
-      .cmp(&b_is_overflow)
+    preferred_snapshot_agent(preference, &b.1)
+      .cmp(&preferred_snapshot_agent(preference, &a.1))
+      .then_with(|| a_is_overflow.cmp(&b_is_overflow))
       .then_with(|| {
         (Some(a.1.machine_id) == previous)
           .cmp(&(Some(b.1.machine_id) == previous))
@@ -534,6 +563,16 @@ async fn select_and_reserve_agent(
   eligible.into_iter().find_map(|(meta, snap)| {
     meta.try_acquire_slot().map(|slot| (meta, snap, slot))
   })
+}
+
+fn preferred_snapshot_agent(
+  preference: &repo::evaluations::SnapshotScheduling,
+  agent: &AgentSnapshot,
+) -> bool {
+  preference.agent == Some(agent.machine_id)
+    || preference.pool.as_deref().is_some_and(|pool| {
+      agent.ephemeral && agent_name_matches_pool(&agent.name, pool)
+    })
 }
 
 fn agent_name_matches_pool(agent_name: &str, pool_name: &str) -> bool {
@@ -905,6 +944,31 @@ mod tests {
       attrs_done: None,
       attrs_total: None,
     }
+  }
+
+  #[test]
+  fn snapshot_worker_preference_matches_pool_and_machine() {
+    use circus_common::{
+      models::AuthKind,
+      repo::evaluations::SnapshotScheduling,
+    };
+
+    let mut builder = agent_snapshot(true, AuthKind::Oidc, Some("owner/repo"));
+    builder.name = "gha-aarch64-linux-123".to_owned();
+    let pool = SnapshotScheduling {
+      pool: Some("gha-aarch64-linux".to_owned()),
+      ..Default::default()
+    };
+    assert!(super::preferred_snapshot_agent(&pool, &builder));
+    builder.ephemeral = false;
+    assert!(!super::preferred_snapshot_agent(&pool, &builder));
+    assert!(super::preferred_snapshot_agent(
+      &SnapshotScheduling {
+        agent: Some(builder.machine_id),
+        ..Default::default()
+      },
+      &builder
+    ));
   }
 
   fn agent_snapshot(

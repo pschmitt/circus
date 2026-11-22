@@ -185,6 +185,7 @@ pub async fn create_snapshot(
   hosts: &[String],
   termuxpp: bool,
   priority: i32,
+  scheduling: &SnapshotScheduling,
 ) -> Result<Evaluation> {
   let mut client = pool.get().await?;
   let tx = client.transaction().await?;
@@ -205,10 +206,20 @@ pub async fn create_snapshot(
     .one()
     .await?;
   tx.execute(
-    "INSERT INTO evaluation_snapshots (evaluation_id, archive, hosts, \
-     termuxpp, priority)
-     VALUES ($1, $2, $3, $4, $5)",
-    &[&row.id, &archive, &hosts, &termuxpp, &priority],
+    "INSERT INTO evaluation_snapshots
+       (evaluation_id, archive, hosts, termuxpp, priority, preferred_pool, \
+     preferred_agent, front)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    &[
+      &row.id,
+      &archive,
+      &hosts,
+      &termuxpp,
+      &priority,
+      &scheduling.pool,
+      &scheduling.agent,
+      &scheduling.front,
+    ],
   )
   .await?;
   tx.commit().await?;
@@ -230,6 +241,40 @@ pub async fn is_snapshot(pool: &PgPool, evaluation_id: Uuid) -> Result<bool> {
     )
     .await?;
   Ok(row.get(0))
+}
+
+/// Dispatch preferences for a working-tree snapshot.
+#[derive(Debug, Default)]
+pub struct SnapshotScheduling {
+  pub pool:  Option<String>,
+  pub agent: Option<Uuid>,
+  pub front: bool,
+}
+
+/// Find the worker preference without loading the snapshot archive.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot read the preference.
+pub async fn snapshot_scheduling(
+  pool: &PgPool,
+  evaluation_id: Uuid,
+) -> Result<SnapshotScheduling> {
+  let client = pool.get().await?;
+  let row = client
+    .query_opt(
+      "SELECT preferred_pool, preferred_agent, front FROM evaluation_snapshots
+     WHERE evaluation_id = $1",
+      &[&evaluation_id],
+    )
+    .await?;
+  Ok(row.map_or_else(SnapshotScheduling::default, |row| {
+    SnapshotScheduling {
+      pool:  row.get(0),
+      agent: row.get(1),
+      front: row.get(2),
+    }
+  }))
 }
 
 pub struct EvaluationSnapshot {

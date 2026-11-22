@@ -114,6 +114,10 @@ struct SubmitSnapshotParams {
   normal_priority: bool,
   #[serde(default)]
   termuxpp:        bool,
+  pool:            Option<String>,
+  agent:           Option<Uuid>,
+  #[serde(default)]
+  front:           bool,
 }
 
 const SNAPSHOT_LIMIT: usize = 16 * 1024 * 1024;
@@ -165,6 +169,36 @@ async fn submit_snapshot(
     )));
   }
 
+  if params.pool.is_some() && params.agent.is_some() {
+    return Err(ApiError(CiError::Validation(
+      "Choose either a pool or an agent".into(),
+    )));
+  }
+  if params.front && params.normal_priority {
+    return Err(ApiError(CiError::Validation(
+      "Choose either front or normal priority".into(),
+    )));
+  }
+  if let Some(pool) = &params.pool
+    && !state
+      .config
+      .queue_runner
+      .ephemeral_pools
+      .iter()
+      .any(|candidate| candidate.name == *pool)
+  {
+    return Err(ApiError(CiError::Validation(
+      "Unknown ephemeral pool".into(),
+    )));
+  }
+  if let Some(agent) = params.agent {
+    repo::builder_sessions::get(&state.pool, agent).await?;
+  }
+  let scheduling = repo::evaluations::SnapshotScheduling {
+    pool:  params.pool,
+    agent: params.agent,
+    front: params.front,
+  };
   // Each submission has its own lifecycle, even for identical archives.
   let snapshot_id = Uuid::new_v4().simple().to_string();
   let priority = if params.normal_priority { 0 } else { 10 };
@@ -177,6 +211,7 @@ async fn submit_snapshot(
       &hosts,
       params.termuxpp,
       priority,
+      &scheduling,
     )
     .await?,
   ))

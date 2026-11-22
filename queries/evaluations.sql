@@ -132,7 +132,9 @@ LIMIT 1;
 SELECT COUNT(*) FROM evaluations;
 
 --! list_pending : EvaluationRow
-SELECT * FROM evaluations WHERE status = 'pending' ORDER BY evaluation_time ASC;
+SELECT e.* FROM evaluations e LEFT JOIN evaluation_snapshots s ON s.evaluation_id = e.id
+WHERE e.status = 'pending'
+ORDER BY COALESCE(s.front, false) DESC, e.evaluation_time ASC;
 
 --! list_jobsets_with_pending
 SELECT DISTINCT jobset_id FROM evaluations WHERE status = 'pending';

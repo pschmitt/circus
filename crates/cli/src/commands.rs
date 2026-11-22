@@ -358,6 +358,15 @@ pub(super) enum EvaluationCommand {
     /// Build TermuxPP guest systems.
     #[pound(long)]
     termuxpp:        bool,
+    /// Prefer the named ephemeral worker pool, then fall back.
+    #[pound(long)]
+    pool:            Option<String>,
+    /// Prefer the registered agent with this machine ID, then fall back.
+    #[pound(long)]
+    agent:           Option<Uuid>,
+    /// Put this snapshot ahead of ordinary pending work.
+    #[pound(long)]
+    front:           bool,
     /// Submit at the ordinary queue priority.
     #[pound(long)]
     normal_priority: bool,
