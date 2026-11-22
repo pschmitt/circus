@@ -100,7 +100,22 @@ impl Autoscaler {
     })
   }
 
-  pub async fn run(mut self) {
+  pub async fn run(self) {
+    if self.cfg.is_pull_request_pool() {
+      let config = self.cfg.clone();
+      let pool = self.pool.clone();
+      let http = self.http.clone();
+      let shutdown = self.shutdown_token.clone();
+      tokio::join!(
+        self.run_autoscaler(),
+        pull_request::reconcile(&config, &http, &pool, &shutdown),
+      );
+    } else {
+      self.run_autoscaler().await;
+    }
+  }
+
+  async fn run_autoscaler(mut self) {
     tracing::info!(
       pool = %self.cfg.name,
       repository = %self.cfg.github_actions.workflow_repository,
@@ -195,11 +210,28 @@ impl Autoscaler {
   }
 
   async fn demand(&self) -> misstep::Result<Demand> {
-    let builds =
-      repo::builds::list_pending_for_systems(&self.pool, &self.cfg.systems)
-        .await
-        .context("load pending builds for GHA autoscaler")?;
     let pr_workflow = self.cfg.pull_request_workflow_ref();
+    let project_ids: Vec<_> = repo::projects::list(&self.pool, i64::MAX, 0)
+      .await?
+      .into_iter()
+      .filter(|project| {
+        github_repository_slug(&project.repository_url).is_some_and(|slug| {
+          self.cfg.allowed_build_repositories.contains(&slug)
+        })
+      })
+      .map(|project| project.id)
+      .collect();
+    let builds = repo::builds::list_pending_for_systems(
+      &self.pool,
+      &self.cfg.systems,
+      &project_ids,
+      pr_workflow.is_some(),
+      &self.cfg.supported_features,
+      &self.cfg.mandatory_features,
+      &self.cfg.name,
+    )
+    .await
+    .context("load pending builds for GHA autoscaler")?;
     let pr_token = if pr_workflow.is_some() {
       Some(load_token(&self.cfg.github_actions).await?)
     } else {

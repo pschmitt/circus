@@ -117,6 +117,29 @@ pub struct ListUnfinishedSourceParams<T1: crate::StringSql> {
     pub jobset_id: uuid::Uuid,
     pub source_scope: T1,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct UnfinishedPullRequestsParams {
+    pub after_project_id: uuid::Uuid,
+    pub after_pr_number: i32,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct CancelClosedPrEvaluationsParams {
+    pub project_id: uuid::Uuid,
+    pub pr_number: i32,
+    pub closed_at: jiff::Timestamp,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct CancelClosedPrBuildsParams {
+    pub project_id: uuid::Uuid,
+    pub pr_number: i32,
+    pub closed_at: jiff::Timestamp,
+}
+#[derive(Debug)]
+pub struct ReopenClosedPrEvaluationParams<T1: crate::StringSql> {
+    pub jobset_id: uuid::Uuid,
+    pub pr_number: i32,
+    pub commit_hash: T1,
+}
 #[derive(Debug)]
 pub struct CancelWithReasonParams<T1: crate::StringSql> {
     pub reason: T1,
@@ -322,6 +345,32 @@ impl<'a> From<BuildContextRowBorrowed<'a>> for BuildContextRow {
             jobset_id,
             jobset_name: jobset_name.into(),
             is_snapshot,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnfinishedPullRequest {
+    pub project_id: uuid::Uuid,
+    pub repository_url: String,
+    pub pr_number: i32,
+}
+pub struct UnfinishedPullRequestBorrowed<'a> {
+    pub project_id: uuid::Uuid,
+    pub repository_url: &'a str,
+    pub pr_number: i32,
+}
+impl<'a> From<UnfinishedPullRequestBorrowed<'a>> for UnfinishedPullRequest {
+    fn from(
+        UnfinishedPullRequestBorrowed {
+            project_id,
+            repository_url,
+            pr_number,
+        }: UnfinishedPullRequestBorrowed<'a>,
+    ) -> Self {
+        Self {
+            project_id,
+            repository_url: repository_url.into(),
+            pr_number,
         }
     }
 }
@@ -672,6 +721,74 @@ where
         mapper: fn(BuildContextRowBorrowed) -> R,
     ) -> BuildContextRowQuery<'c, 'a, 's, C, R, N> {
         BuildContextRowQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub async fn one(self) -> Result<T, tokio_postgres::Error> {
+        let row =
+            crate::client::async_::one(self.client, self.query, &self.params, self.cached).await?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub async fn all(self) -> Result<Vec<T>, tokio_postgres::Error> {
+        self.iter().await?.try_collect().await
+    }
+    pub async fn opt(self) -> Result<Option<T>, tokio_postgres::Error> {
+        let opt_row =
+            crate::client::async_::opt(self.client, self.query, &self.params, self.cached).await?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub async fn iter(
+        self,
+    ) -> Result<
+        impl futures::Stream<Item = Result<T, tokio_postgres::Error>> + 'c,
+        tokio_postgres::Error,
+    > {
+        let stream = crate::client::async_::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )
+        .await?;
+        let mapped = stream
+            .map(move |res| {
+                res.and_then(|row| {
+                    let extracted = (self.extractor)(&row)?;
+                    Ok((self.mapper)(extracted))
+                })
+            })
+            .into_stream();
+        Ok(mapped)
+    }
+}
+pub struct UnfinishedPullRequestQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s tokio_postgres::Statement>,
+    extractor:
+        fn(&tokio_postgres::Row) -> Result<UnfinishedPullRequestBorrowed, tokio_postgres::Error>,
+    mapper: fn(UnfinishedPullRequestBorrowed) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> UnfinishedPullRequestQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(UnfinishedPullRequestBorrowed) -> R,
+    ) -> UnfinishedPullRequestQuery<'c, 'a, 's, C, R, N> {
+        UnfinishedPullRequestQuery {
             client: self.client,
             params: self.params,
             query: self.query,
@@ -2434,6 +2551,226 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>
         params: &'a ListUnfinishedSourceParams<T1>,
     ) -> EvaluationRowQuery<'c, 'a, 's, C, EvaluationRow, 2> {
         self.bind(client, &params.jobset_id, &params.source_scope)
+    }
+}
+pub struct UnfinishedPullRequestsStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn unfinished_pull_requests() -> UnfinishedPullRequestsStmt {
+    UnfinishedPullRequestsStmt(
+        "SELECT DISTINCT p.id AS project_id, p.repository_url, e.pr_number FROM evaluations e JOIN jobsets j ON j.id = e.jobset_id JOIN projects p ON p.id = j.project_id WHERE e.pr_number IS NOT NULL AND (p.id, e.pr_number) > ($1, $2) AND e.superseded_by IS NULL AND (e.status IN ('pending', 'running') OR EXISTS ( SELECT 1 FROM builds b WHERE b.evaluation_id = e.id AND b.status IN ('pending', 'running') )) ORDER BY p.id, e.pr_number LIMIT 32",
+        None,
+    )
+}
+impl UnfinishedPullRequestsStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c C,
+        after_project_id: &'a uuid::Uuid,
+        after_pr_number: &'a i32,
+    ) -> UnfinishedPullRequestQuery<'c, 'a, 's, C, UnfinishedPullRequest, 2> {
+        UnfinishedPullRequestQuery {
+            client,
+            params: [after_project_id, after_pr_number],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |
+                row: &tokio_postgres::Row,
+            | -> Result<UnfinishedPullRequestBorrowed, tokio_postgres::Error> {
+                Ok(UnfinishedPullRequestBorrowed {
+                    project_id: row.try_get(0)?,
+                    repository_url: row.try_get(1)?,
+                    pr_number: row.try_get(2)?,
+                })
+            },
+            mapper: |it| UnfinishedPullRequest::from(it),
+        }
+    }
+}
+impl<'c, 'a, 's, C: GenericClient>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        UnfinishedPullRequestsParams,
+        UnfinishedPullRequestQuery<'c, 'a, 's, C, UnfinishedPullRequest, 2>,
+        C,
+    > for UnfinishedPullRequestsStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a UnfinishedPullRequestsParams,
+    ) -> UnfinishedPullRequestQuery<'c, 'a, 's, C, UnfinishedPullRequest, 2> {
+        self.bind(client, &params.after_project_id, &params.after_pr_number)
+    }
+}
+pub struct CancelClosedPrEvaluationsStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn cancel_closed_pr_evaluations() -> CancelClosedPrEvaluationsStmt {
+    CancelClosedPrEvaluationsStmt(
+        "UPDATE evaluations e SET status = 'cancelled', error_message = 'GitHub pull request closed' FROM jobsets j WHERE e.jobset_id = j.id AND j.project_id = $1 AND e.pr_number = $2 AND e.evaluation_time <= $3 AND e.status IN ('pending', 'running')",
+        None,
+    )
+}
+impl CancelClosedPrEvaluationsStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub async fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c C,
+        project_id: &'a uuid::Uuid,
+        pr_number: &'a i32,
+        closed_at: &'a jiff::Timestamp,
+    ) -> Result<u64, tokio_postgres::Error> {
+        client
+            .execute(self.0, &[project_id, pr_number, closed_at])
+            .await
+    }
+}
+impl<'a, C: GenericClient + Send + Sync>
+    crate::client::async_::Params<
+        'a,
+        'a,
+        'a,
+        CancelClosedPrEvaluationsParams,
+        std::pin::Pin<
+            Box<dyn futures::Future<Output = Result<u64, tokio_postgres::Error>> + Send + 'a>,
+        >,
+        C,
+    > for CancelClosedPrEvaluationsStmt
+{
+    fn params(
+        &'a self,
+        client: &'a C,
+        params: &'a CancelClosedPrEvaluationsParams,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Future<Output = Result<u64, tokio_postgres::Error>> + Send + 'a>,
+    > {
+        Box::pin(self.bind(
+            client,
+            &params.project_id,
+            &params.pr_number,
+            &params.closed_at,
+        ))
+    }
+}
+pub struct CancelClosedPrBuildsStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn cancel_closed_pr_builds() -> CancelClosedPrBuildsStmt {
+    CancelClosedPrBuildsStmt(
+        "UPDATE builds b SET status = 'cancelled', completed_at = NOW(), error_message = 'GitHub pull request closed' FROM evaluations e JOIN jobsets j ON e.jobset_id = j.id WHERE b.evaluation_id = e.id AND j.project_id = $1 AND e.pr_number = $2 AND e.evaluation_time <= $3 AND b.status IN ('pending', 'running')",
+        None,
+    )
+}
+impl CancelClosedPrBuildsStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub async fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c C,
+        project_id: &'a uuid::Uuid,
+        pr_number: &'a i32,
+        closed_at: &'a jiff::Timestamp,
+    ) -> Result<u64, tokio_postgres::Error> {
+        client
+            .execute(self.0, &[project_id, pr_number, closed_at])
+            .await
+    }
+}
+impl<'a, C: GenericClient + Send + Sync>
+    crate::client::async_::Params<
+        'a,
+        'a,
+        'a,
+        CancelClosedPrBuildsParams,
+        std::pin::Pin<
+            Box<dyn futures::Future<Output = Result<u64, tokio_postgres::Error>> + Send + 'a>,
+        >,
+        C,
+    > for CancelClosedPrBuildsStmt
+{
+    fn params(
+        &'a self,
+        client: &'a C,
+        params: &'a CancelClosedPrBuildsParams,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Future<Output = Result<u64, tokio_postgres::Error>> + Send + 'a>,
+    > {
+        Box::pin(self.bind(
+            client,
+            &params.project_id,
+            &params.pr_number,
+            &params.closed_at,
+        ))
+    }
+}
+pub struct ReopenClosedPrEvaluationStmt(&'static str, Option<tokio_postgres::Statement>);
+pub fn reopen_closed_pr_evaluation() -> ReopenClosedPrEvaluationStmt {
+    ReopenClosedPrEvaluationStmt(
+        "UPDATE evaluations e SET status = 'pending', evaluation_time = NOW(), error_message = NULL, started_at = NULL, finished_at = NULL, orphaned_count = 0 WHERE e.jobset_id = $1 AND e.pr_number = $2 AND e.commit_hash = $3 AND e.superseded_by IS NULL AND ( (e.status = 'cancelled' AND e.error_message = 'GitHub pull request closed') OR (e.status = 'completed' AND EXISTS ( SELECT 1 FROM builds b WHERE b.evaluation_id = e.id AND b.status = 'cancelled' AND b.error_message = 'GitHub pull request closed' )) ) RETURNING e.id",
+        None,
+    )
+}
+impl ReopenClosedPrEvaluationStmt {
+    pub async fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a C,
+    ) -> Result<Self, tokio_postgres::Error> {
+        self.1 = Some(client.prepare(self.0).await?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>(
+        &'s self,
+        client: &'c C,
+        jobset_id: &'a uuid::Uuid,
+        pr_number: &'a i32,
+        commit_hash: &'a T1,
+    ) -> UuidUuidQuery<'c, 'a, 's, C, uuid::Uuid, 3> {
+        UuidUuidQuery {
+            client,
+            params: [jobset_id, pr_number, commit_hash],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |row| Ok(row.try_get(0)?),
+            mapper: |it| it,
+        }
+    }
+}
+impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        ReopenClosedPrEvaluationParams<T1>,
+        UuidUuidQuery<'c, 'a, 's, C, uuid::Uuid, 3>,
+        C,
+    > for ReopenClosedPrEvaluationStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a ReopenClosedPrEvaluationParams<T1>,
+    ) -> UuidUuidQuery<'c, 'a, 's, C, uuid::Uuid, 3> {
+        self.bind(
+            client,
+            &params.jobset_id,
+            &params.pr_number,
+            &params.commit_hash,
+        )
     }
 }
 pub struct CancelWithReasonStmt(&'static str, Option<tokio_postgres::Statement>);

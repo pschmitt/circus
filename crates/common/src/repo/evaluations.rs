@@ -819,6 +819,65 @@ pub async fn list_unfinished_source(
     .collect()
 }
 
+/// List a page of outstanding pull requests for lifecycle reconciliation.
+/// # Errors
+/// Returns an error if the database query fails.
+pub async fn unfinished_pull_requests(
+  pool: &PgPool,
+  after: (Uuid, i32),
+) -> Result<Vec<q::UnfinishedPullRequest>> {
+  let client = pool.get().await?;
+  let rows = q::unfinished_pull_requests()
+    .bind(&client, &after.0, &after.1)
+    .all()
+    .await?;
+  Ok(rows)
+}
+
+/// Cancel outstanding work for a closed PR, preserving completed builds and
+/// evaluations queued after the close event.
+/// # Errors
+/// Returns an error if the database transaction fails.
+pub async fn cancel_closed_pr(
+  pool: &PgPool,
+  project_id: Uuid,
+  pr_number: i32,
+  closed_at: jiff::Timestamp,
+) -> Result<()> {
+  let mut client = pool.get().await?;
+  let tx = client.transaction().await?;
+  q::cancel_closed_pr_evaluations()
+    .bind(&tx, &project_id, &pr_number, &closed_at)
+    .await?;
+  q::cancel_closed_pr_builds()
+    .bind(&tx, &project_id, &pr_number, &closed_at)
+    .await?;
+  tx.commit().await?;
+  Ok(())
+}
+
+/// Resume the same head if its existing evaluation was stopped by closure.
+/// # Errors
+/// Returns an error if the database transaction fails.
+pub async fn reopen_closed_pr(
+  pool: &PgPool,
+  jobset_id: Uuid,
+  pr_number: i32,
+  commit_hash: &str,
+) -> Result<bool> {
+  let mut client = pool.get().await?;
+  let tx = client.transaction().await?;
+  let id = q::reopen_closed_pr_evaluation()
+    .bind(&tx, &jobset_id, &pr_number, &commit_hash)
+    .opt()
+    .await?;
+  if let Some(id) = id {
+    q::restart_delete_builds().bind(&tx, &id).await?;
+  }
+  tx.commit().await?;
+  Ok(id.is_some())
+}
+
 /// Cancel an evaluation and its unfinished builds, recording `reason` on both.
 ///
 /// # Errors

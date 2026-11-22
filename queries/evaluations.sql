@@ -1,5 +1,6 @@
 --: EvaluationRow(error_message?, inputs_hash?, pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, started_at?, source_scope?, superseded_by?, source_base_commit?, finished_at?, commit_subject?, attrs_done?, attrs_total?)
 --: ProjectEvaluationHistoryRow(duration_seconds?)
+--: UnfinishedPullRequest()
 
 --! create_with_kind (pr_number?, pr_head_branch?, pr_base_branch?, pr_action?, source_scope?, source_base_commit?) : EvaluationRow
 INSERT INTO evaluations (
@@ -239,6 +240,54 @@ WHERE e.jobset_id = :jobset_id
     WHERE b.evaluation_id = e.id
       AND b.status IN ('pending', 'running')
   ));
+
+--! unfinished_pull_requests : UnfinishedPullRequest
+SELECT DISTINCT p.id AS project_id, p.repository_url, e.pr_number
+FROM evaluations e
+JOIN jobsets j ON j.id = e.jobset_id
+JOIN projects p ON p.id = j.project_id
+WHERE e.pr_number IS NOT NULL
+  AND (p.id, e.pr_number) > (:after_project_id, :after_pr_number)
+  AND e.superseded_by IS NULL
+  AND (e.status IN ('pending', 'running') OR EXISTS (
+    SELECT 1 FROM builds b
+    WHERE b.evaluation_id = e.id AND b.status IN ('pending', 'running')
+  ))
+ORDER BY p.id, e.pr_number
+LIMIT 32;
+
+--! cancel_closed_pr_evaluations
+UPDATE evaluations e
+SET status = 'cancelled', error_message = 'GitHub pull request closed'
+FROM jobsets j
+WHERE e.jobset_id = j.id AND j.project_id = :project_id
+  AND e.pr_number = :pr_number AND e.evaluation_time <= :closed_at
+  AND e.status IN ('pending', 'running');
+
+--! cancel_closed_pr_builds
+UPDATE builds b
+SET status = 'cancelled', completed_at = NOW(),
+    error_message = 'GitHub pull request closed'
+FROM evaluations e JOIN jobsets j ON e.jobset_id = j.id
+WHERE b.evaluation_id = e.id AND j.project_id = :project_id
+  AND e.pr_number = :pr_number AND e.evaluation_time <= :closed_at
+  AND b.status IN ('pending', 'running');
+
+--! reopen_closed_pr_evaluation
+UPDATE evaluations e
+SET status = 'pending', evaluation_time = NOW(), error_message = NULL,
+    started_at = NULL, finished_at = NULL, orphaned_count = 0
+WHERE e.jobset_id = :jobset_id AND e.pr_number = :pr_number
+  AND e.commit_hash = :commit_hash AND e.superseded_by IS NULL
+  AND (
+    (e.status = 'cancelled' AND e.error_message = 'GitHub pull request closed')
+    OR (e.status = 'completed' AND EXISTS (
+      SELECT 1 FROM builds b
+      WHERE b.evaluation_id = e.id AND b.status = 'cancelled'
+        AND b.error_message = 'GitHub pull request closed'
+    ))
+  )
+RETURNING e.id;
 
 --! cancel_with_reason
 UPDATE evaluations SET status = 'cancelled', error_message = :reason

@@ -82,6 +82,24 @@ pub struct ListPendingInSchedulerOrderParams<T1: crate::StringSql, T2: crate::St
     pub limit: i64,
     pub offset: i64,
 }
+#[derive(Debug)]
+pub struct ListPendingForSystemsParams<
+    T1: crate::StringSql,
+    T2: crate::ArraySql<Item = T1>,
+    T3: crate::ArraySql<Item = uuid::Uuid>,
+    T4: crate::StringSql,
+    T5: crate::ArraySql<Item = T4>,
+    T6: crate::StringSql,
+    T7: crate::ArraySql<Item = T6>,
+    T8: crate::StringSql,
+> {
+    pub systems: T2,
+    pub project_ids: T3,
+    pub pull_requests: bool,
+    pub supported_features: T5,
+    pub mandatory_features: T7,
+    pub pool_name: T8,
+}
 #[derive(Clone, Copy, Debug)]
 pub struct BumpPriorityParams {
     pub delta: i32,
@@ -2658,7 +2676,7 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql, T2: crate::StringSql>
 pub struct ListPendingForSystemsStmt(&'static str, Option<tokio_postgres::Statement>);
 pub fn list_pending_for_systems() -> ListPendingForSystemsStmt {
     ListPendingForSystemsStmt(
-        "SELECT b.* FROM builds b WHERE status = 'pending' AND system = ANY($1) ORDER BY COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC, priority DESC, created_at ASC LIMIT 512",
+        "WITH candidates AS ( SELECT b.id, COALESCE(s.front, false) AS front, b.priority, b.created_at, row_number() OVER ( PARTITION BY j.project_id, e.pr_number ORDER BY COALESCE(s.front, false) DESC, b.priority DESC, b.created_at, b.id ) AS source_position FROM builds b JOIN evaluations e ON e.id = b.evaluation_id JOIN jobsets j ON j.id = e.jobset_id LEFT JOIN evaluation_snapshots s ON s.evaluation_id = e.id WHERE b.status = 'pending' AND b.system = ANY($1) AND e.superseded_by IS NULL AND j.project_id = ANY($2::uuid[]) AND ( CASE WHEN $3::boolean THEN e.pr_number IS NOT NULL AND e.pr_head_branch IS NOT NULL AND e.pr_base_branch = j.branch ELSE e.pr_number IS NULL AND e.pr_head_branch IS NULL AND e.pr_base_branch IS NULL AND j.branch IS NOT NULL AND j.branch <> '' AND e.trigger_kind IN ('source_change', 'snapshot', 'manual', 'interval') END ) AND COALESCE(b.effective_features, b.required_features) <@ $4::text[] AND COALESCE(b.effective_features, b.required_features) @> $5::text[] AND ( b.job_name LIKE 'drv:%' OR ( (s.preferred_pool IS NULL OR s.preferred_pool = $6::text) AND (s.preferred_agent IS NULL OR s.worker_fallback) ) ) AND NOT EXISTS ( SELECT 1 FROM build_dependencies bd JOIN builds dep ON dep.id = bd.dependency_build_id WHERE bd.build_id = b.id AND dep.status != 'succeeded' ) ) SELECT b.* FROM candidates c JOIN builds b ON b.id = c.id ORDER BY c.front DESC, c.source_position, c.priority DESC, c.created_at, c.id LIMIT 512",
         None,
     )
 }
@@ -2677,14 +2695,32 @@ impl ListPendingForSystemsStmt {
         C: GenericClient,
         T1: crate::StringSql,
         T2: crate::ArraySql<Item = T1>,
+        T3: crate::ArraySql<Item = uuid::Uuid>,
+        T4: crate::StringSql,
+        T5: crate::ArraySql<Item = T4>,
+        T6: crate::StringSql,
+        T7: crate::ArraySql<Item = T6>,
+        T8: crate::StringSql,
     >(
         &'s self,
         client: &'c C,
         systems: &'a T2,
-    ) -> BuildRowQuery<'c, 'a, 's, C, BuildRow, 1> {
+        project_ids: &'a T3,
+        pull_requests: &'a bool,
+        supported_features: &'a T5,
+        mandatory_features: &'a T7,
+        pool_name: &'a T8,
+    ) -> BuildRowQuery<'c, 'a, 's, C, BuildRow, 6> {
         BuildRowQuery {
             client,
-            params: [systems],
+            params: [
+                systems,
+                project_ids,
+                pull_requests,
+                supported_features,
+                mandatory_features,
+                pool_name,
+            ],
             query: self.0,
             cached: self.1.as_ref(),
             extractor:
@@ -2728,6 +2764,45 @@ impl ListPendingForSystemsStmt {
                 },
             mapper: |it| BuildRow::from(it),
         }
+    }
+}
+impl<
+    'c,
+    'a,
+    's,
+    C: GenericClient,
+    T1: crate::StringSql,
+    T2: crate::ArraySql<Item = T1>,
+    T3: crate::ArraySql<Item = uuid::Uuid>,
+    T4: crate::StringSql,
+    T5: crate::ArraySql<Item = T4>,
+    T6: crate::StringSql,
+    T7: crate::ArraySql<Item = T6>,
+    T8: crate::StringSql,
+>
+    crate::client::async_::Params<
+        'c,
+        'a,
+        's,
+        ListPendingForSystemsParams<T1, T2, T3, T4, T5, T6, T7, T8>,
+        BuildRowQuery<'c, 'a, 's, C, BuildRow, 6>,
+        C,
+    > for ListPendingForSystemsStmt
+{
+    fn params(
+        &'s self,
+        client: &'c C,
+        params: &'a ListPendingForSystemsParams<T1, T2, T3, T4, T5, T6, T7, T8>,
+    ) -> BuildRowQuery<'c, 'a, 's, C, BuildRow, 6> {
+        self.bind(
+            client,
+            &params.systems,
+            &params.project_ids,
+            &params.pull_requests,
+            &params.supported_features,
+            &params.mandatory_features,
+            &params.pool_name,
+        )
     }
 }
 pub struct PendingFeatureDemandStmt(&'static str, Option<tokio_postgres::Statement>);

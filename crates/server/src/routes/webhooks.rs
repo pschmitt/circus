@@ -262,6 +262,20 @@ async fn trigger_change_request_evaluations(
         repo::evaluations::SourceOrder::After,
       )
     };
+    if input.action.as_deref() == Some("reopened")
+      && let Some(number) = input.number
+      && repo::evaluations::reopen_closed_pr(
+        &state.pool,
+        jobset.id,
+        number,
+        &input.commit,
+      )
+      .await?
+    {
+      triggered += 1;
+      continue;
+    }
+
     match repo::evaluations::enqueue_source(
       &state.pool,
       CreateEvaluation {

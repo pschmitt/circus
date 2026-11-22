@@ -292,6 +292,217 @@ async fn create_test_build(
   .expect("create build")
 }
 
+async fn create_test_pr(
+  pool: &circus_common::PgPool,
+  jobset_id: uuid::Uuid,
+  number: i32,
+) -> Evaluation {
+  repo::evaluations::create(pool, CreateEvaluation {
+    pr_number: Some(number),
+    pr_head_branch: Some(format!("pr-{number}")),
+    pr_base_branch: Some("main".to_owned()),
+    ..source_evaluation(jobset_id)
+  })
+  .await
+  .expect("create pull request evaluation")
+}
+
+#[tokio::test]
+async fn autoscaler_samples_small_prs_behind_large_and_blocked_queues() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+  let project = create_test_project(&pool, "autoscaler").await;
+  let jobset = create_test_jobset(&pool, project.id).await;
+  let large = create_test_pr(&pool, jobset.id, 1).await;
+  let blocked = create_test_pr(&pool, jobset.id, 2).await;
+  let small = create_test_pr(&pool, jobset.id, 3).await;
+  let client = pool.get().await.unwrap();
+  client
+    .execute("UPDATE jobsets SET branch = 'main' WHERE id = $1", &[
+      &jobset.id,
+    ])
+    .await
+    .unwrap();
+  client
+    .execute(
+      "INSERT INTO builds (evaluation_id, job_name, drv_path, system, \
+       priority, status)
+     SELECT $1, 'large-' || n, '/nix/store/large-' || n || '.drv', \
+       'aarch64-linux', 10, 'pending'
+     FROM generate_series(1, 520) AS n",
+      &[&large.id],
+    )
+    .await
+    .unwrap();
+  let dependency = create_test_build(
+    &pool,
+    blocked.id,
+    "dependency",
+    "/nix/store/unsupported.drv",
+    Some("x86_64-linux"),
+  )
+  .await;
+  client
+    .execute(
+      "WITH inserted AS (
+       INSERT INTO builds (evaluation_id, job_name, drv_path, system, \
+       priority, status)
+       SELECT $1, 'blocked-' || n, '/nix/store/blocked-' || n || '.drv', \
+       'aarch64-linux', 20, 'pending'
+       FROM generate_series(1, 520) AS n RETURNING id
+     )
+     INSERT INTO build_dependencies (build_id, dependency_build_id)
+     SELECT id, $2 FROM inserted",
+      &[&blocked.id, &dependency.id],
+    )
+    .await
+    .unwrap();
+  let small_build = create_test_build(
+    &pool,
+    small.id,
+    "small",
+    "/nix/store/small.drv",
+    Some("aarch64-linux"),
+  )
+  .await;
+  let builds = repo::builds::list_pending_for_systems(
+    &pool,
+    &["aarch64-linux".to_owned()],
+    &[project.id],
+    true,
+    &[],
+    &[],
+    "gha-pr-aarch64-linux",
+  )
+  .await
+  .unwrap();
+  assert_eq!(builds.len(), 512);
+  assert_eq!(builds[0].evaluation_id, large.id);
+  assert_eq!(builds[1].id, small_build.id);
+  assert!(builds.iter().all(|build| build.evaluation_id != blocked.id));
+  repo::projects::delete(&pool, project.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn closed_pr_cancels_unfinished_work_in_its_project_across_jobsets() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+  let project = create_test_project(&pool, "closed-pr").await;
+  let other = create_test_project(&pool, "different-project").await;
+  let jobset = create_test_jobset(&pool, project.id).await;
+  let arm = create_test_jobset(&pool, project.id).await;
+  let unrelated_jobset = create_test_jobset(&pool, other.id).await;
+  let pending = create_test_pr(&pool, jobset.id, 13).await;
+  let completed = create_test_pr(&pool, arm.id, 13).await;
+  repo::evaluations::update_status(
+    &pool,
+    completed.id,
+    EvaluationStatus::Completed,
+    None,
+  )
+  .await
+  .unwrap();
+  let succeeded =
+    create_test_build(&pool, completed.id, "ok", "/nix/store/ok.drv", None)
+      .await;
+  repo::builds::complete(
+    &pool,
+    succeeded.id,
+    BuildStatus::Succeeded,
+    None,
+    Some("/nix/store/ok"),
+    None,
+  )
+  .await
+  .unwrap();
+  let queued = create_test_build(
+    &pool,
+    completed.id,
+    "queued",
+    "/nix/store/queued.drv",
+    None,
+  )
+  .await;
+  let different_pr = create_test_pr(&pool, jobset.id, 14).await;
+  let unrelated = create_test_pr(&pool, unrelated_jobset.id, 13).await;
+  let closed_at = jiff::Timestamp::now();
+  let newer = create_test_pr(&pool, arm.id, 13).await;
+  for _ in 0..2 {
+    repo::evaluations::cancel_closed_pr(&pool, project.id, 13, closed_at)
+      .await
+      .unwrap();
+  }
+  assert_eq!(
+    repo::evaluations::get(&pool, pending.id)
+      .await
+      .unwrap()
+      .status,
+    EvaluationStatus::Cancelled
+  );
+  assert_eq!(
+    repo::evaluations::get(&pool, completed.id)
+      .await
+      .unwrap()
+      .status,
+    EvaluationStatus::Completed
+  );
+  assert_eq!(
+    repo::builds::get(&pool, queued.id).await.unwrap().status,
+    BuildStatus::Cancelled
+  );
+  assert_eq!(
+    repo::builds::get(&pool, succeeded.id).await.unwrap().status,
+    BuildStatus::Succeeded
+  );
+  assert!(
+    repo::evaluations::reopen_closed_pr(
+      &pool,
+      arm.id,
+      13,
+      &completed.commit_hash
+    )
+    .await
+    .unwrap()
+  );
+  assert!(
+    !repo::evaluations::reopen_closed_pr(
+      &pool,
+      arm.id,
+      13,
+      &completed.commit_hash
+    )
+    .await
+    .unwrap()
+  );
+  repo::evaluations::cancel_closed_pr(&pool, project.id, 13, closed_at)
+    .await
+    .unwrap();
+  assert_eq!(
+    repo::evaluations::get(&pool, completed.id)
+      .await
+      .unwrap()
+      .status,
+    EvaluationStatus::Pending
+  );
+  assert_eq!(
+    repo::builds::get(&pool, succeeded.id).await.unwrap().status,
+    BuildStatus::Succeeded
+  );
+  for evaluation in [different_pr, unrelated, newer] {
+    assert_eq!(
+      repo::evaluations::get(&pool, evaluation.id)
+        .await
+        .unwrap()
+        .status,
+      EvaluationStatus::Pending
+    );
+  }
+  repo::projects::delete(&pool, project.id).await.unwrap();
+  repo::projects::delete(&pool, other.id).await.unwrap();
+}
+
 /// `list_pending` as seen by a runner host that builds `x86_64-linux`.
 async fn list_pending_x86(
   pool: &circus_common::PgPool,

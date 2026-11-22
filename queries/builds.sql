@@ -252,11 +252,50 @@ ORDER BY
 LIMIT :limit OFFSET :offset;
 
 --! list_pending_for_systems : BuildRow
-SELECT b.* FROM builds b
-WHERE status = 'pending' AND system = ANY(:systems)
-ORDER BY
-  COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC,
-  priority DESC, created_at ASC
+WITH candidates AS (
+  SELECT b.id,
+    COALESCE(s.front, false) AS front,
+    b.priority,
+    b.created_at,
+    row_number() OVER (
+      PARTITION BY j.project_id, e.pr_number
+      ORDER BY COALESCE(s.front, false) DESC, b.priority DESC, b.created_at, b.id
+    ) AS source_position
+  FROM builds b
+  JOIN evaluations e ON e.id = b.evaluation_id
+  JOIN jobsets j ON j.id = e.jobset_id
+  LEFT JOIN evaluation_snapshots s ON s.evaluation_id = e.id
+  WHERE b.status = 'pending'
+    AND b.system = ANY(:systems)
+    AND e.superseded_by IS NULL
+    AND j.project_id = ANY(:project_ids::uuid[])
+    AND (
+      CASE WHEN :pull_requests::boolean THEN
+        e.pr_number IS NOT NULL AND e.pr_head_branch IS NOT NULL AND e.pr_base_branch = j.branch
+      ELSE
+        e.pr_number IS NULL AND e.pr_head_branch IS NULL AND e.pr_base_branch IS NULL
+        AND j.branch IS NOT NULL AND j.branch <> ''
+        AND e.trigger_kind IN ('source_change', 'snapshot', 'manual', 'interval')
+      END
+    )
+    AND COALESCE(b.effective_features, b.required_features) <@ :supported_features::text[]
+    AND COALESCE(b.effective_features, b.required_features) @> :mandatory_features::text[]
+    AND (
+      b.job_name LIKE 'drv:%'
+      OR (
+        (s.preferred_pool IS NULL OR s.preferred_pool = :pool_name::text)
+        AND (s.preferred_agent IS NULL OR s.worker_fallback)
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM build_dependencies bd
+      JOIN builds dep ON dep.id = bd.dependency_build_id
+      WHERE bd.build_id = b.id AND dep.status != 'succeeded'
+    )
+)
+SELECT b.* FROM candidates c
+JOIN builds b ON b.id = c.id
+ORDER BY c.front DESC, c.source_position, c.priority DESC, c.created_at, c.id
 LIMIT 512;
 
 --! pending_feature_demand

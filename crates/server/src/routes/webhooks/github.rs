@@ -66,9 +66,10 @@ struct GithubPullRequestPayload {
 
 #[derive(Debug, Deserialize)]
 struct GithubPullRequest {
-  head:  Option<GithubPrRef>,
-  base:  Option<GithubPrRef>,
-  draft: Option<bool>,
+  head:      Option<GithubPrRef>,
+  base:      Option<GithubPrRef>,
+  draft:     Option<bool>,
+  closed_at: Option<jiff::Timestamp>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +381,26 @@ async fn handle_pull_request(
     ));
   };
 
+  if action == "closed" {
+    let number = payload.number.and_then(|n| i32::try_from(n).ok());
+    if let (Some(number), Some(closed_at)) = (number, pr.closed_at) {
+      repo::evaluations::cancel_closed_pr(
+        &state.pool,
+        project_id,
+        number,
+        closed_at,
+      )
+      .await?;
+    }
+    return Ok((
+      StatusCode::OK,
+      Json(WebhookResponse {
+        accepted: true,
+        message:  "Handled pull request closure".to_string(),
+      }),
+    ));
+  }
+
   if !should_evaluate_pull_request_action(action, pr.draft) {
     let message = if pr.draft.unwrap_or(false) {
       "Draft pull request, skipping".to_string()
@@ -455,7 +476,7 @@ async fn handle_pull_request(
 fn is_supported_pull_request_action(action: &str) -> bool {
   matches!(
     action,
-    "opened" | "synchronize" | "reopened" | "ready_for_review"
+    "opened" | "synchronize" | "reopened" | "ready_for_review" | "closed"
   )
 }
 
@@ -488,7 +509,8 @@ mod tests {
       "ready_for_review",
       None
     ));
-    assert!(!is_supported_pull_request_action("closed"));
+    assert!(is_supported_pull_request_action("closed"));
+    assert!(!should_evaluate_pull_request_action("closed", Some(false)));
   }
 
   #[test]

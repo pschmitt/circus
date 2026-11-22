@@ -562,19 +562,30 @@ pub async fn list_pending_in_scheduler_order_filtered(
   rows.into_iter().map(Build::try_from).collect()
 }
 
-/// List up to 512 pending builds for any of the given systems, in dispatch
-/// priority order. Used by the ephemeral-agent autoscaler to estimate demand.
-///
+/// Sample up to 512 ready builds compatible with an ephemeral pool, taking
+/// one candidate per source before taking another from the same source.
 /// # Errors
-///
-/// Returns error if the database query fails.
+/// Returns an error if the database query fails.
 pub async fn list_pending_for_systems(
   pool: &PgPool,
   systems: &[String],
+  project_ids: &[Uuid],
+  pull_requests: bool,
+  supported_features: &[String],
+  mandatory_features: &[String],
+  pool_name: &str,
 ) -> Result<Vec<Build>> {
   let client = pool.get().await?;
   let rows = q::list_pending_for_systems()
-    .bind(&client, &systems)
+    .bind(
+      &client,
+      &systems,
+      &project_ids,
+      &pull_requests,
+      &supported_features,
+      &mandatory_features,
+      &pool_name,
+    )
     .all()
     .await?;
   rows.into_iter().map(Build::try_from).collect()
