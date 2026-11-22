@@ -327,6 +327,8 @@ pub struct BuildVenue<'a> {
   pub systems:                 &'a [String],
   pub supported_features:      &'a [String],
   pub mandatory_features:      &'a [String],
+  /// Whether the venue has an execution slot available now.
+  pub has_capacity:            bool,
   /// Builds without a system run only on the runner host.
   pub runs_systemless:         bool,
   /// Whether this venue requires a branch evaluation before dispatch.
@@ -337,8 +339,9 @@ pub struct BuildVenue<'a> {
 }
 
 /// List pending builds some venue can take, plus any older than
-/// `unsupported_before`, prioritizing constrained jobs before fungible ones so
-/// scarce builder capabilities are reserved for the work that needs them.
+/// `unsupported_before`. Prefer builds with a free compatible slot, then
+/// prioritize constrained jobs so scarce capabilities are reserved for the
+/// work that needs them.
 ///
 /// `schedulable_capacity` is the fair-share denominator, so it needs to
 /// include agent slots as well as local workers.

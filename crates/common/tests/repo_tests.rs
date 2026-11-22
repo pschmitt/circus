@@ -210,6 +210,7 @@ async fn snapshot_persists_request_with_evaluation() {
 
   let systems = ["x86_64-linux".to_owned()];
   let venue = repo::builds::BuildVenue {
+    has_capacity:            true,
     systems: &systems,
     supported_features: &[],
     mandatory_features: &[],
@@ -299,6 +300,7 @@ async fn list_pending_x86(
 ) -> Vec<Build> {
   let systems = ["x86_64-linux".to_owned()];
   let venue = repo::builds::BuildVenue {
+    has_capacity:            true,
     systems:              &systems,
     supported_features:   &[],
     mandatory_features:   &[],
@@ -1839,6 +1841,88 @@ async fn test_list_pending_skips_builds_no_venue_can_serve() {
 }
 
 #[tokio::test]
+async fn test_full_arm_venue_does_not_hide_ready_x86_build() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+  let project = create_test_project(&pool, "full-arm-venue").await;
+  let jobset = create_test_jobset(&pool, project.id).await;
+  let eval = create_test_eval(&pool, jobset.id).await;
+  let arm = create_test_build(
+    &pool,
+    eval.id,
+    "arm",
+    "/nix/store/full-arm-test.drv",
+    Some("aarch64-linux"),
+  )
+  .await;
+  repo::builds::bump_priority(&pool, arm.id, 10)
+    .await
+    .expect("prioritize the waiting ARM build");
+  let x86 = create_test_build(
+    &pool,
+    eval.id,
+    "x86",
+    "/nix/store/free-x86-test.drv",
+    Some("x86_64-linux"),
+  )
+  .await;
+  let arm_systems = ["aarch64-linux".to_owned()];
+  let x86_systems = ["x86_64-linux".to_owned()];
+  let mut venues = vec![
+    repo::builds::BuildVenue {
+      systems:                 &arm_systems,
+      supported_features:      &[],
+      mandatory_features:      &[],
+      has_capacity:            false,
+      runs_systemless:         false,
+      requires_trusted_ref:    false,
+      verified_pr_evaluations: None,
+      machine_id:              None,
+      ephemeral_agent_name:    None,
+    },
+    repo::builds::BuildVenue {
+      systems:                 &x86_systems,
+      supported_features:      &[],
+      mandatory_features:      &[],
+      has_capacity:            true,
+      runs_systemless:         false,
+      requires_trusted_ref:    false,
+      verified_pr_evaluations: None,
+      machine_id:              None,
+      ephemeral_agent_name:    None,
+    },
+  ];
+  let pending = repo::builds::list_pending(&pool, &venues, None, 1, 2)
+    .await
+    .expect("list pending builds while ARM is full");
+  assert_eq!(pending.first().map(|b| b.id), Some(x86.id));
+
+  let pending = repo::builds::list_pending(
+    &pool,
+    &venues,
+    Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)),
+    1,
+    2,
+  )
+  .await
+  .expect("list pending builds with unsupported timeout enabled");
+  assert_eq!(pending.first().map(|b| b.id), Some(x86.id));
+
+  let pending = repo::builds::list_pending(&pool, &venues[..1], None, 1, 2)
+    .await
+    .expect("keep full venues eligible when no slot is free");
+  assert_eq!(pending.first().map(|b| b.id), Some(arm.id));
+
+  venues[0].has_capacity = true;
+  let pending = repo::builds::list_pending(&pool, &venues, None, 1, 2)
+    .await
+    .expect("list pending builds with both systems available");
+  assert_eq!(pending.first().map(|b| b.id), Some(arm.id));
+  let _ = repo::projects::delete(&pool, project.id).await;
+}
+
+#[tokio::test]
 async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
   let Some(pool) = get_pool().await else {
     return;
@@ -1880,6 +1964,7 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
 
   let systems = [system.to_owned()];
   let venue = repo::builds::BuildVenue {
+    has_capacity:            true,
     systems:              &systems,
     supported_features:   &[],
     mandatory_features:   &[],
@@ -1895,6 +1980,7 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
   assert_eq!(pending.first().map(|build| build.id), Some(main_build.id));
 
   let venue = repo::builds::BuildVenue {
+    has_capacity:            true,
     systems:              &systems,
     supported_features:   &[],
     mandatory_features:   &[],
@@ -1910,6 +1996,7 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
   assert_eq!(pending.first().map(|build| build.id), Some(pr_build.id));
 
   let pr_venue = |verified| repo::builds::BuildVenue {
+    has_capacity:            true,
     systems:                 &systems,
     supported_features:      &[],
     mandatory_features:      &[],

@@ -429,6 +429,7 @@ pub async fn run(
           systems:                 &agent.systems,
           supported_features:      &agent.supported_features,
           mandatory_features:      &agent.mandatory_features,
+          has_capacity:            agent.current_jobs < agent.max_jobs,
           runs_systemless:         false,
           requires_trusted_ref:    worker_pool
             .agent_requires_trusted_ref(agent),
@@ -441,7 +442,11 @@ pub async fn run(
             .then_some(agent.name.as_str()),
         }
       })
-      .chain(worker_pool.runner_caps().venue())
+      .chain(
+        worker_pool
+          .runner_caps()
+          .venue_with_capacity(worker_pool.has_local_capacity()),
+      )
       .collect::<Vec<_>>();
     let unsupported_before =
       unsupported_timeout.map(|timeout| jiff::Timestamp::now() - timeout);

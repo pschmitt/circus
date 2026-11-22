@@ -175,6 +175,11 @@ impl WorkerPool {
   }
 
   #[must_use]
+  pub(crate) fn has_local_capacity(&self) -> bool {
+    self.semaphore.available_permits() > 0
+  }
+
+  #[must_use]
   pub const fn agent_pool(&self) -> &Arc<AgentPool> {
     &self.agent_pool
   }

@@ -63,6 +63,7 @@ WITH venues AS MATERIALIZED (
     systems text[],
     supported_features text[],
     mandatory_features text[],
+    has_capacity bool,
     runs_systemless bool,
     requires_trusted_ref bool,
     verified_pr_evaluations uuid[],
@@ -71,9 +72,42 @@ WITH venues AS MATERIALIZED (
   )
 ),
 eligible_pending AS (
-  SELECT b.*
+  SELECT b.id, b.evaluation_id, (b.is_aggregate OR COALESCE(matching.has_capacity, false)) AS has_capacity
   FROM builds b
   LEFT JOIN evaluation_snapshots pin ON pin.evaluation_id = b.evaluation_id AND b.job_name NOT LIKE 'drv:%'
+  LEFT JOIN LATERAL (
+    SELECT bool_or(v.has_capacity) AS has_capacity
+    FROM venues v
+    WHERE (
+        b.system = 'builtin'
+        OR b.system = ANY(v.systems)
+        OR (b.system IS NULL AND v.runs_systemless)
+      )
+      AND (
+        pin.preferred_pool IS NULL
+        OR v.ephemeral_agent_name = pin.preferred_pool
+        OR regexp_replace(v.ephemeral_agent_name, '-(gh[0-9]+([.][0-9]+)?-)?[0-9a-f]{8}$', '') = pin.preferred_pool
+      )
+      AND (pin.preferred_agent IS NULL OR pin.worker_fallback OR v.machine_id = pin.preferred_agent)
+      AND COALESCE(b.effective_features, b.required_features) <@ v.supported_features
+      AND v.mandatory_features <@ COALESCE(b.effective_features, b.required_features)
+      AND CASE
+        WHEN v.verified_pr_evaluations IS NOT NULL
+          THEN b.evaluation_id = ANY(v.verified_pr_evaluations)
+        ELSE NOT v.requires_trusted_ref
+        OR EXISTS (
+          SELECT 1
+          FROM evaluations candidate
+          JOIN jobsets jobset ON jobset.id = candidate.jobset_id
+          WHERE candidate.id = b.evaluation_id
+            AND jobset.branch <> ''
+            AND candidate.pr_number IS NULL
+            AND candidate.pr_head_branch IS NULL
+            AND candidate.pr_base_branch IS NULL
+            AND candidate.trigger_kind IN ('source_change', 'manual', 'interval', 'snapshot')
+        )
+      END
+  ) matching ON true
   WHERE b.status = 'pending'
     AND (
       b.is_aggregate
@@ -82,39 +116,7 @@ eligible_pending AS (
         AND pin.preferred_pool IS NULL
         AND (pin.preferred_agent IS NULL OR pin.worker_fallback)
       )
-      OR EXISTS (
-        SELECT 1
-        FROM venues v
-        WHERE (
-            b.system = 'builtin'
-            OR b.system = ANY(v.systems)
-            OR (b.system IS NULL AND v.runs_systemless)
-          )
-          AND (
-            pin.preferred_pool IS NULL
-            OR v.ephemeral_agent_name = pin.preferred_pool
-            OR regexp_replace(v.ephemeral_agent_name, '-(gh[0-9]+([.][0-9]+)?-)?[0-9a-f]{8}$', '') = pin.preferred_pool
-          )
-          AND (pin.preferred_agent IS NULL OR pin.worker_fallback OR v.machine_id = pin.preferred_agent)
-          AND COALESCE(b.effective_features, b.required_features) <@ v.supported_features
-          AND v.mandatory_features <@ COALESCE(b.effective_features, b.required_features)
-          AND CASE
-            WHEN v.verified_pr_evaluations IS NOT NULL
-              THEN b.evaluation_id = ANY(v.verified_pr_evaluations)
-            ELSE NOT v.requires_trusted_ref
-            OR EXISTS (
-              SELECT 1
-              FROM evaluations candidate
-              JOIN jobsets jobset ON jobset.id = candidate.jobset_id
-              WHERE candidate.id = b.evaluation_id
-                AND jobset.branch <> ''
-                AND candidate.pr_number IS NULL
-                AND candidate.pr_head_branch IS NULL
-                AND candidate.pr_base_branch IS NULL
-                AND candidate.trigger_kind IN ('source_change', 'manual', 'interval', 'snapshot')
-            )
-          END
-      )
+      OR matching.has_capacity IS NOT NULL
     )
     AND NOT EXISTS (
       SELECT 1
@@ -148,10 +150,12 @@ active_shares AS (
   GROUP BY j.id, j.scheduling_shares, rc.running
 )
 SELECT b.*
-FROM eligible_pending b
+FROM builds b
+JOIN eligible_pending eligible ON eligible.id = b.id
 JOIN evaluations e ON b.evaluation_id = e.id
 JOIN active_shares ash ON ash.jobset_id = e.jobset_id
 ORDER BY
+  eligible.has_capacity DESC,
   COALESCE((SELECT front FROM evaluation_snapshots WHERE evaluation_id = b.evaluation_id), false) DESC,
   b.priority DESC,
   cardinality(COALESCE(b.effective_features, b.required_features)) DESC,

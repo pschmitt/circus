@@ -92,16 +92,24 @@ impl RunnerCaps {
   /// [`list_pending`]: circus_common::repo::builds::list_pending
   #[must_use]
   pub fn venue(&self) -> Option<BuildVenue<'_>> {
+    self.venue_with_capacity(true)
+  }
+
+  pub(crate) fn venue_with_capacity(
+    &self,
+    has_capacity: bool,
+  ) -> Option<BuildVenue<'_>> {
     self.enabled.then(|| {
       BuildVenue {
-        systems:                 &self.systems,
-        supported_features:      &self.features,
-        mandatory_features:      &[],
-        runs_systemless:         true,
-        requires_trusted_ref:    false,
+        systems: &self.systems,
+        supported_features: &self.features,
+        mandatory_features: &[],
+        has_capacity,
+        runs_systemless: true,
+        requires_trusted_ref: false,
         verified_pr_evaluations: None,
-        machine_id:              None,
-        ephemeral_agent_name:    None,
+        machine_id: None,
+        ephemeral_agent_name: None,
       }
     })
   }
