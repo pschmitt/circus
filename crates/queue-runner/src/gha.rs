@@ -413,10 +413,12 @@ impl Autoscaler {
     let Some(repository) = github_repository_slug(&project.repository_url) else {
       return Ok(false);
     };
-    if repository != self.cfg.github_actions.workflow_repository
-      || !self.cfg.allowed_build_repositories.contains(&repository)
-      || jobset.branch.as_deref() != Some(base)
-    {
+    if !allowed_pr_source(
+      &repository,
+      base,
+      jobset.branch.as_deref(),
+      &self.cfg.allowed_build_repositories,
+    ) {
       return Ok(false);
     }
     pull_request::verify(
@@ -480,6 +482,15 @@ impl Autoscaler {
   }
 }
 
+fn allowed_pr_source(
+  repository: &str,
+  base: &str,
+  jobset_branch: Option<&str>,
+  allowed: &[String],
+) -> bool {
+  allowed.iter().any(|item| item == repository) && jobset_branch == Some(base)
+}
+
 fn calculate_overflow_count(
   builds: &[EligibleBuild],
   matched: &[bool],
@@ -526,6 +537,14 @@ async fn load_token(cfg: &GithubActionsPoolConfig) -> misstep::Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn pr_source_must_be_allowlisted_and_target_jobset_branch() {
+    let allowed = vec!["owner/project".to_string()];
+    assert!(allowed_pr_source("owner/project", "main", Some("main"), &allowed));
+    assert!(!allowed_pr_source("other/project", "main", Some("main"), &allowed));
+    assert!(!allowed_pr_source("owner/project", "other", Some("main"), &allowed));
+  }
 
   fn test_http_client() -> reqwest::Client {
     let _ = rustls::crypto::ring::default_provider().install_default();
