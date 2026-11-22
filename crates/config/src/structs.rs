@@ -88,6 +88,8 @@ pub struct DatabaseConfig {
 )]
 #[serde(default)]
 pub struct ServerConfig {
+  /// Read-only queue runner demand report used by the operator API.
+  pub qemu_overflow_status:               Option<QemuOverflowStatusConfig>,
   pub host:                               String,
   pub port:                               u16,
   pub request_timeout:                    u64,
@@ -944,9 +946,16 @@ impl Default for DatabaseConfig {
     }
   }
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QemuOverflowStatusConfig {
+  pub status_file:     PathBuf,
+  pub status_ttl_secs: u64,
+}
+
 impl Default for ServerConfig {
   fn default() -> Self {
     Self {
+      qemu_overflow_status:               None,
       host:                               "127.0.0.1".to_string(),
       port:                               3000,
       request_timeout:                    30,

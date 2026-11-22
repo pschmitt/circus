@@ -526,23 +526,24 @@ pub async fn queue(state: &AppState) -> Result<Vec<OperatorQueueSystem>> {
 }
 
 async fn current_qemu_overflow_count(state: &AppState) -> Option<u32> {
-  let overflow = state
-    .config
-    .queue_runner
-    .ephemeral_pools
-    .iter()
-    .find_map(|pool| pool.qemu_overflow.as_ref())?;
-  match overflow_demand::read_fresh(
-    &overflow.status_file,
-    overflow.status_ttl_secs,
-  )
-  .await
-  {
+  let (status_file, status_ttl) =
+    if let Some(overflow) = &state.config.server.qemu_overflow_status {
+      (&overflow.status_file, overflow.status_ttl_secs)
+    } else {
+      let overflow = state
+        .config
+        .queue_runner
+        .ephemeral_pools
+        .iter()
+        .find_map(|pool| pool.qemu_overflow.as_ref())?;
+      (&overflow.status_file, overflow.status_ttl_secs)
+    };
+  match overflow_demand::read_fresh(status_file, status_ttl).await {
     Ok(Some(report)) => Some(report.overflow_count),
     Ok(None) => None,
     Err(error) => {
       tracing::warn!(
-        path = %overflow.status_file.display(),
+        path = %status_file.display(),
         "failed to read fresh QEMU overflow demand state: {error}"
       );
       None

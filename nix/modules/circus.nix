@@ -374,10 +374,21 @@
     (name: _: builtins.elem name ["webhook_secret_encryption_key" "webhook_secret_encryption_key_file"])
     (cfg.settings.server or {});
 
+  # The API only needs the demand report, not the queue runner's RPC or tokens.
+  qemuOverflow =
+    lib.findFirst (pool: (pool.qemu_overflow or null) != null) null
+    (cfg.settings.queue_runner.ephemeral_pools or []);
+
   serverFiles =
     serviceFiles "circus-server"
     ((builtins.removeAttrs cfg.settings ["notifications" "queue_runner"])
       // {
+        server = (cfg.settings.server or {}) // lib.optionalAttrs (qemuOverflow != null) {
+          qemu_overflow_status = {
+            inherit (qemuOverflow.qemu_overflow) status_file;
+            status_ttl_secs = qemuOverflow.qemu_overflow.status_ttl_secs or 60;
+          };
+        };
         cache = builtins.removeAttrs cfg.settings.cache ["secret_key_file"];
         signing = builtins.removeAttrs cfg.settings.signing ["key_file"];
       });
