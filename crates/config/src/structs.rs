@@ -91,6 +91,8 @@ pub struct ServerConfig {
   /// Repository URLs for which administrators may submit working-tree
   /// snapshots.
   pub snapshot_repositories:              Vec<String>,
+  /// Pool names exposed to a server running without queue-runner settings.
+  pub snapshot_pools:                     Option<Vec<String>>,
   /// Read-only queue runner demand report used by the operator API.
   pub qemu_overflow_status:               Option<QemuOverflowStatusConfig>,
   pub host:                               String,
@@ -248,18 +250,21 @@ impl Default for PageAccessConfig {
 )]
 #[serde(default)]
 pub struct EvaluatorConfig {
-  pub poll_interval:        u64,
-  pub git_timeout:          u64,
-  pub nix_timeout:          u64,
+  /// Caches accessible to snapshot builders. When set, evaluator-local outputs
+  /// are only considered available if a listed cache can serve them.
+  pub snapshot_substituters: Option<Vec<String>>,
+  pub poll_interval:         u64,
+  pub git_timeout:           u64,
+  pub nix_timeout:           u64,
   /// Optional wall-clock limit for an entire evaluation. `None` disables it.
-  pub max_eval_time:        Option<u64>,
-  pub max_concurrent_evals: usize,
-  pub work_dir:             PathBuf,
-  pub restrict_eval:        bool,
-  pub allow_ifd:            bool,
+  pub max_eval_time:         Option<u64>,
+  pub max_concurrent_evals:  usize,
+  pub work_dir:              PathBuf,
+  pub restrict_eval:         bool,
+  pub allow_ifd:             bool,
   /// Extra `allowed-uris` prefixes honored under `restrict_eval`, merged with
   /// the lock-derived set when `auto_allowed_uris` is on.
-  pub allowed_uris:         Vec<String>,
+  pub allowed_uris:          Vec<String>,
 
   /// Derive `allowed-uris` from committed flake and Tack lock files.
   pub auto_allowed_uris: bool,
@@ -959,6 +964,7 @@ impl Default for ServerConfig {
   fn default() -> Self {
     Self {
       snapshot_repositories:              Vec::new(),
+      snapshot_pools:                     None,
       qemu_overflow_status:               None,
       host:                               "127.0.0.1".to_string(),
       port:                               3000,
@@ -1009,6 +1015,7 @@ impl Default for UiConfig {
 impl Default for EvaluatorConfig {
   fn default() -> Self {
     Self {
+      snapshot_substituters:    None,
       poll_interval:            60,
       git_timeout:              600,
       nix_timeout:              1800,

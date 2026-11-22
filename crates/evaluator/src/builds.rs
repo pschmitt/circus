@@ -136,11 +136,13 @@ async fn show_derivations(
   derivations
 }
 
-/// Outputs neither in the local store nor on a substituter. Paths the checks
+/// Outputs absent from the configured caches and, when trusted, the local
+/// store. Paths the checks
 /// cannot vouch for are treated as invalid so the derivation still gets
 /// enqueued.
 async fn invalid_output_paths<'a>(
   derivations: impl Iterator<Item = &'a DerivationInfo>,
+  trust_local_outputs: bool,
   substituters: &[Substituter],
   memory_limit: MemoryLimit,
 ) -> HashSet<String> {
@@ -152,27 +154,31 @@ async fn invalid_output_paths<'a>(
     .collect::<Vec<String>>();
 
   let mut invalid = HashSet::new();
-  for chunk in paths.chunks(1024) {
-    let mut command = Command::new("nix-store");
-    command
-      .args(["--check-validity", "--print-invalid"])
-      .args(chunk)
-      .kill_on_drop(true);
-    let output = if memory_limit.apply_to(&mut command).is_ok() {
-      command.output().await.ok()
-    } else {
-      None
-    };
-    match output {
-      Some(output) if output.status.success() => {
-        invalid.extend(
-          String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_owned),
-        );
-      },
-      _ => invalid.extend(chunk.iter().cloned()),
+  if trust_local_outputs {
+    for chunk in paths.chunks(1024) {
+      let mut command = Command::new("nix-store");
+      command
+        .args(["--check-validity", "--print-invalid"])
+        .args(chunk)
+        .kill_on_drop(true);
+      let output = if memory_limit.apply_to(&mut command).is_ok() {
+        command.output().await.ok()
+      } else {
+        None
+      };
+      match output {
+        Some(output) if output.status.success() => {
+          invalid.extend(
+            String::from_utf8_lossy(&output.stdout)
+              .lines()
+              .map(str::to_owned),
+          );
+        },
+        _ => invalid.extend(chunk.iter().cloned()),
+      }
     }
+  } else {
+    invalid.extend(paths);
   }
 
   for path in substitutable(&invalid, substituters).await {
@@ -455,6 +461,7 @@ pub(crate) struct BuildStream<'a> {
   present:             HashSet<String>,
   touched:             HashSet<Uuid>,
   substituters:        Vec<Substituter>,
+  trust_local_outputs: bool,
   aggregates:          Vec<NixJob>,
   dropped:             usize,
 }
@@ -468,6 +475,7 @@ impl<'a> BuildStream<'a> {
     memory_limit: MemoryLimit,
     allowed_systems: Option<&'a HashSet<String>>,
     s3_substituters: Option<&S3SubstituterCredentials>,
+    snapshot_substituters: Option<&[String]>,
   ) -> misstep::Result<Self> {
     let mut drv_to_build = HashMap::new();
     let mut name_to_build = HashMap::new();
@@ -494,7 +502,15 @@ impl<'a> BuildStream<'a> {
       dependencies,
       present: HashSet::new(),
       touched: HashSet::new(),
-      substituters: nix_substituters(memory_limit, s3_substituters).await,
+      substituters: if let Some(urls) = snapshot_substituters {
+        urls
+          .iter()
+          .filter_map(|url| Substituter::parse(url, s3_substituters))
+          .collect()
+      } else {
+        nix_substituters(memory_limit, s3_substituters).await
+      },
+      trust_local_outputs: snapshot_substituters.is_none(),
       aggregates: Vec::new(),
       dropped: 0,
     })
@@ -576,6 +592,7 @@ impl<'a> BuildStream<'a> {
       let shown = show_derivations(&frontier, self.memory_limit).await;
       let invalid_outputs = invalid_output_paths(
         shown.values(),
+        self.trust_local_outputs,
         &self.substituters,
         self.memory_limit,
       )
@@ -835,6 +852,47 @@ mod tests {
     }
   }
 
+  #[tokio::test]
+  #[ignore = "requires a writable Nix store"]
+  async fn local_only_outputs_are_missing_for_snapshot_builders()
+  -> misstep::Result<()> {
+    let fixture = tempfile::NamedTempFile::new()?;
+    std::fs::write(fixture.path(), "circus snapshot locality test")?;
+    let output = tokio::process::Command::new("nix-store")
+      .arg("--add")
+      .arg(fixture.path())
+      .output()
+      .await?;
+    assert!(output.status.success());
+    let path = String::from_utf8(output.stdout)?.trim().to_owned();
+    let info = super::DerivationInfo {
+      system:            None,
+      outputs:           Some(HashMap::from([(
+        "out".to_owned(),
+        path.clone(),
+      )])),
+      input_drvs:        None,
+      required_features: Vec::new(),
+    };
+    let local = super::invalid_output_paths(
+      [&info].into_iter(),
+      true,
+      &[],
+      MemoryLimit::new(None),
+    )
+    .await;
+    let remote = super::invalid_output_paths(
+      [&info].into_iter(),
+      false,
+      &[],
+      MemoryLimit::new(None),
+    )
+    .await;
+    assert!(local.is_empty());
+    assert!(remote.contains(&path));
+    Ok(())
+  }
+
   #[test]
   fn aliased_jobs_get_unique_edges_on_their_own_builds() {
     let jobs = [
@@ -916,7 +974,7 @@ mod tests {
   }
 
   async fn open(pool: &PgPool, eval_id: Uuid) -> BuildStream<'_> {
-    BuildStream::open(pool, eval_id, MemoryLimit::new(None), None, None)
+    BuildStream::open(pool, eval_id, MemoryLimit::new(None), None, None, None)
       .await
       .expect("open stream")
   }

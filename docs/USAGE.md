@@ -1003,3 +1003,8 @@ closure stays queued when its target has no capacity. Specify `--agent` with
 `--fallback` to allow other compatible workers. Prerequisites can use any
 compatible builder. Use `--front` to put the evaluation and its eligible
 builds ahead of ordinary queued work. Running work continues.
+
+
+Set `evaluator.snapshot_substituters` to the binary caches reachable by your
+snapshot builders when they run on other machines. This keeps evaluator-local
+prerequisites in the queue until a builder can serve their outputs.

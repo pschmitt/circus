@@ -186,17 +186,25 @@ async fn submit_snapshot(
       "Choose either front or normal priority".into(),
     )));
   }
-  if let Some(pool) = &params.pool
-    && !state
-      .config
-      .queue_runner
-      .ephemeral_pools
-      .iter()
-      .any(|candidate| candidate.name == *pool)
-  {
-    return Err(ApiError(CiError::Validation(
-      "Unknown ephemeral pool".into(),
-    )));
+  if let Some(pool) = &params.pool {
+    let known = state.config.server.snapshot_pools.as_ref().map_or_else(
+      || {
+        state
+          .config
+          .queue_runner
+          .ephemeral_pools
+          .iter()
+          .any(|candidate| {
+            candidate.name == *pool && !candidate.is_pull_request_pool()
+          })
+      },
+      |pools| pools.contains(pool),
+    );
+    if !known {
+      return Err(ApiError(CiError::Validation(
+        "Unknown snapshot pool".into(),
+      )));
+    }
   }
   if let Some(agent) = params.agent {
     repo::builder_sessions::get(&state.pool, agent).await?;

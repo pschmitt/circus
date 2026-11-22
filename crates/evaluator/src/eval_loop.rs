@@ -739,6 +739,7 @@ async fn run_nix_and_record_builds(
     MemoryLimit::from(config),
     allowed_systems.as_ref(),
     config.s3_substituters.as_ref(),
+    snapshot.and(config.snapshot_substituters.as_deref()),
   )
   .await?;
   stream.priority = snapshot.map_or(0, |(_, request)| request.priority);
