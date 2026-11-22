@@ -65,16 +65,23 @@ WITH venues AS MATERIALIZED (
     mandatory_features text[],
     runs_systemless bool,
     requires_trusted_ref bool,
-    verified_pr_evaluations uuid[]
+    verified_pr_evaluations uuid[],
+    machine_id uuid,
+    ephemeral_agent_name text
   )
 ),
 eligible_pending AS (
   SELECT b.*
   FROM builds b
+  LEFT JOIN evaluation_snapshots pin ON pin.evaluation_id = b.evaluation_id AND b.job_name NOT LIKE 'drv:%'
   WHERE b.status = 'pending'
     AND (
       b.is_aggregate
-      OR b.created_at < :unsupported_before::timestamptz
+      OR (
+        b.created_at < :unsupported_before::timestamptz
+        AND pin.preferred_pool IS NULL
+        AND (pin.preferred_agent IS NULL OR pin.worker_fallback)
+      )
       OR EXISTS (
         SELECT 1
         FROM venues v
@@ -83,6 +90,12 @@ eligible_pending AS (
             OR b.system = ANY(v.systems)
             OR (b.system IS NULL AND v.runs_systemless)
           )
+          AND (
+            pin.preferred_pool IS NULL
+            OR v.ephemeral_agent_name = pin.preferred_pool
+            OR regexp_replace(v.ephemeral_agent_name, '-(gh[0-9]+([.][0-9]+)?-)?[0-9a-f]{8}$', '') = pin.preferred_pool
+          )
+          AND (pin.preferred_agent IS NULL OR pin.worker_fallback OR v.machine_id = pin.preferred_agent)
           AND COALESCE(b.effective_features, b.required_features) <@ v.supported_features
           AND v.mandatory_features <@ COALESCE(b.effective_features, b.required_features)
           AND CASE

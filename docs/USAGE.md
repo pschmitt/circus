@@ -997,10 +997,9 @@ Snapshot jobs and their queued prerequisites start at priority 10. Use
 the configured jobset's eligible builders. Commit notifications, automatic
 channel promotion, and repository-driven jobset sync are skipped.
 
-Pass `--pool <name>` to prefer a configured ephemeral pool, or `--agent <uuid>`
-to prefer one registered agent. The preference applies to the selected host
-closures. Their prerequisites can use any compatible builder. A cold pool
-gets up to two minutes to supply a worker. Circus falls back to compatible
-workers when the preferred venue is unavailable. Use `--front` to put the
-evaluation and its eligible builds ahead of ordinary queued work. Running
-work continues.
+Pass `--pool <name>` to restrict the host closure to one configured ephemeral
+pool, or `--agent <uuid>` to restrict it to one registered agent. A pinned
+closure stays queued when its target has no capacity. Specify `--agent` with
+`--fallback` to allow other compatible workers. Prerequisites can use any
+compatible builder. Use `--front` to put the evaluation and its eligible
+builds ahead of ordinary queued work. Running work continues.

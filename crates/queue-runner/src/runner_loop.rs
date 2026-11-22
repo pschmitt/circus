@@ -426,12 +426,19 @@ pub async fn run(
       .iter()
       .map(|agent| {
         BuildVenue {
-          systems:              &agent.systems,
-          supported_features:   &agent.supported_features,
-          mandatory_features:   &agent.mandatory_features,
-          runs_systemless:      false,
-          requires_trusted_ref: worker_pool.agent_requires_trusted_ref(agent),
-          verified_pr_evaluations: worker_pool.agent_pool().verified_pr_evaluations(agent),
+          systems:                 &agent.systems,
+          supported_features:      &agent.supported_features,
+          mandatory_features:      &agent.mandatory_features,
+          runs_systemless:         false,
+          requires_trusted_ref:    worker_pool
+            .agent_requires_trusted_ref(agent),
+          verified_pr_evaluations: worker_pool
+            .agent_pool()
+            .verified_pr_evaluations(agent),
+          machine_id:              Some(agent.machine_id),
+          ephemeral_agent_name:    agent
+            .ephemeral
+            .then_some(agent.name.as_str()),
         }
       })
       .chain(worker_pool.runner_caps().venue())

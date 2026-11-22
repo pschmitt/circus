@@ -215,6 +215,26 @@ impl Autoscaler {
       ) {
         continue;
       }
+      let scheduling = if build.is_dependency() {
+        repo::evaluations::SnapshotScheduling::default()
+      } else {
+        match repo::evaluations::snapshot_scheduling(
+          &self.pool,
+          build.evaluation_id,
+        )
+        .await
+        {
+          Ok(scheduling) => scheduling,
+          Err(error) => {
+            tracing::warn!(%error, evaluation_id = %build.evaluation_id,
+              "Could not read snapshot worker pin for pool demand");
+            continue;
+          },
+        }
+      };
+      if !scheduling.allows_pool_launch(&self.cfg.name) {
+        continue;
+      }
       let allowed = if let Some(cached) = eligibility.get(&build.evaluation_id) {
         *cached
       } else {
@@ -238,6 +258,7 @@ impl Autoscaler {
       };
       if allowed {
         let overflow_eligible = pr_workflow.is_none()
+          && !scheduling.requires_selected_worker()
           && self.cfg.qemu_overflow.as_ref().is_some_and(|overflow| {
             let threshold = jiff::Timestamp::now().as_second().saturating_sub(
               i64::try_from(overflow.grace_secs).unwrap_or(i64::MAX),

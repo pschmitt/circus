@@ -1252,14 +1252,20 @@
           {
             "name": "pool",
             "in": "query",
-            "description": "Preferred ephemeral pool name",
+            "description": "Required ephemeral pool name",
             "schema": { "type": "string" }
           },
           {
             "name": "agent",
             "in": "query",
-            "description": "Preferred registered agent machine ID",
+            "description": "Registered agent machine ID",
             "schema": { "$ref": "#/components/schemas/Uuid" }
+          },
+          {
+            "name": "fallback",
+            "in": "query",
+            "description": "Allow other compatible workers for an exact agent pin",
+            "schema": { "type": "boolean", "default": false }
           },
           {
             "name": "front",

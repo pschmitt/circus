@@ -208,8 +208,8 @@ pub async fn create_snapshot(
   tx.execute(
     "INSERT INTO evaluation_snapshots
        (evaluation_id, archive, hosts, termuxpp, priority, preferred_pool, \
-     preferred_agent, front)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+     preferred_agent, front, worker_fallback)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     &[
       &row.id,
       &archive,
@@ -219,6 +219,7 @@ pub async fn create_snapshot(
       &scheduling.pool,
       &scheduling.agent,
       &scheduling.front,
+      &scheduling.fallback,
     ],
   )
   .await?;
@@ -246,9 +247,27 @@ pub async fn is_snapshot(pool: &PgPool, evaluation_id: Uuid) -> Result<bool> {
 /// Dispatch preferences for a working-tree snapshot.
 #[derive(Debug, Default)]
 pub struct SnapshotScheduling {
-  pub pool:  Option<String>,
-  pub agent: Option<Uuid>,
-  pub front: bool,
+  pub pool:     Option<String>,
+  pub agent:    Option<Uuid>,
+  pub fallback: bool,
+  pub front:    bool,
+}
+
+impl SnapshotScheduling {
+  #[must_use]
+  pub fn requires_selected_worker(&self) -> bool {
+    self.pool.is_some() || (self.agent.is_some() && !self.fallback)
+  }
+
+  #[must_use]
+  pub fn allows_pool_launch(&self, pool: &str) -> bool {
+    self
+      .pool
+      .as_deref()
+      .map_or(self.agent.is_none() || self.fallback, |selected| {
+        selected == pool
+      })
+  }
 }
 
 /// Find the worker preference without loading the snapshot archive.
@@ -263,16 +282,18 @@ pub async fn snapshot_scheduling(
   let client = pool.get().await?;
   let row = client
     .query_opt(
-      "SELECT preferred_pool, preferred_agent, front FROM evaluation_snapshots
+      "SELECT preferred_pool, preferred_agent, front, worker_fallback FROM \
+       evaluation_snapshots
      WHERE evaluation_id = $1",
       &[&evaluation_id],
     )
     .await?;
   Ok(row.map_or_else(SnapshotScheduling::default, |row| {
     SnapshotScheduling {
-      pool:  row.get(0),
-      agent: row.get(1),
-      front: row.get(2),
+      pool:     row.get(0),
+      agent:    row.get(1),
+      front:    row.get(2),
+      fallback: row.get(3),
     }
   }))
 }

@@ -265,39 +265,29 @@ pub async fn reserve_venue(
   let preference = if build.is_dependency() {
     repo::evaluations::SnapshotScheduling::default()
   } else {
-    repo::evaluations::snapshot_scheduling(&ctx.pool, build.evaluation_id)
+    match repo::evaluations::snapshot_scheduling(&ctx.pool, build.evaluation_id)
       .await
-      .unwrap_or_else(|error| {
+    {
+      Ok(preference) => preference,
+      Err(error) => {
         tracing::warn!(%error, evaluation_id = %build.evaluation_id,
-          "Could not read snapshot scheduling preference");
-        Default::default()
-      })
+          "Could not read snapshot worker pin");
+        return None;
+      },
+    }
   };
-  // Give a cold ephemeral pool time to start a compatible runner. An exact
-  // agent preference can fall back immediately when the agent has no capacity.
-  const POOL_START_GRACE_SECS: i64 = 120;
-  let wait_for_pool = preference.pool.is_some()
-    && jiff::Timestamp::now()
-      .as_second()
-      .saturating_sub(build.created_at.as_second())
-      < POOL_START_GRACE_SECS;
   let features = build.scheduling_features();
-  let local = (!wait_for_pool && ctx.runner_caps.supports(system, features))
-    .then(|| Arc::clone(&ctx.worker_semaphore));
+  let local = (!preference.requires_selected_worker()
+    && ctx.runner_caps.supports(system, features))
+  .then(|| Arc::clone(&ctx.worker_semaphore));
   let venue = wait_for_venue(
     &AGENT_CAPACITY_CHANGED,
     &AGENT_RECHECK,
     || {
       let preference = &preference;
       async move {
-        let (meta, snap, slot) = select_and_reserve_agent(
-          ctx,
-          build,
-          system?,
-          preference,
-          wait_for_pool,
-        )
-        .await?;
+        let (meta, snap, slot) =
+          select_and_reserve_agent(ctx, build, system?, preference).await?;
         Some(ExecutionReservation::Agent {
           meta,
           snap: Box::new(snap),
@@ -374,7 +364,6 @@ async fn select_and_reserve_agent(
   build: &Build,
   system: &str,
   preference: &repo::evaluations::SnapshotScheduling,
-  wait_for_pool: bool,
 ) -> Option<(Arc<AgentMeta>, AgentSnapshot, SlotGuard)> {
   let mut candidates = ctx.agent_pool.candidates_for(system);
   if candidates.is_empty() {
@@ -400,7 +389,8 @@ async fn select_and_reserve_agent(
 
   candidates.retain(|(_, snap)| {
     snap.supports_features(build.scheduling_features())
-      && (!wait_for_pool || preferred_snapshot_agent(preference, snap))
+      && (!preference.requires_selected_worker()
+        || preferred_snapshot_agent(preference, snap))
   });
   if candidates.is_empty() {
     return None;
@@ -571,8 +561,43 @@ fn preferred_snapshot_agent(
 ) -> bool {
   preference.agent == Some(agent.machine_id)
     || preference.pool.as_deref().is_some_and(|pool| {
-      agent.ephemeral && agent_name_matches_pool(&agent.name, pool)
+      agent.ephemeral
+        && agent.auth_kind == circus_common::models::AuthKind::Oidc
+        && snapshot_pool_name_matches(&agent.name, pool)
     })
+}
+
+fn snapshot_pool_name_matches(agent: &str, pool: &str) -> bool {
+  if agent == pool {
+    return true;
+  }
+  let Some(suffix) = agent
+    .strip_prefix(pool)
+    .and_then(|suffix| suffix.strip_prefix('-'))
+  else {
+    return false;
+  };
+  let nonce = if let Some((run, nonce)) = suffix
+    .strip_prefix("gh")
+    .and_then(|suffix| suffix.split_once('-'))
+  {
+    let (id, attempt) = run
+      .split_once('.')
+      .map_or((run, None), |(id, attempt)| (id, Some(attempt)));
+    let digits = |value: &str| {
+      !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    if !digits(id) || !attempt.is_none_or(digits) {
+      return false;
+    }
+    nonce
+  } else {
+    suffix
+  };
+  nonce.len() == 8
+    && nonce
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn agent_name_matches_pool(agent_name: &str, pool_name: &str) -> bool {
@@ -954,12 +979,14 @@ mod tests {
     };
 
     let mut builder = agent_snapshot(true, AuthKind::Oidc, Some("owner/repo"));
-    builder.name = "gha-aarch64-linux-123".to_owned();
+    builder.name = "gha-aarch64-linux-gh123.1-deadbeef".to_owned();
     let pool = SnapshotScheduling {
       pool: Some("gha-aarch64-linux".to_owned()),
       ..Default::default()
     };
     assert!(super::preferred_snapshot_agent(&pool, &builder));
+    builder.name = "gha-aarch64-linux-other-gh123.1-deadbeef".to_owned();
+    assert!(!super::preferred_snapshot_agent(&pool, &builder));
     builder.ephemeral = false;
     assert!(!super::preferred_snapshot_agent(&pool, &builder));
     assert!(super::preferred_snapshot_agent(
@@ -969,6 +996,29 @@ mod tests {
       },
       &builder
     ));
+  }
+
+  #[test]
+  fn strict_worker_pins_do_not_allow_unrelated_pool_launches() {
+    use circus_common::repo::evaluations::SnapshotScheduling;
+
+    let pool = SnapshotScheduling {
+      pool: Some("gha-aarch64-linux".to_owned()),
+      ..SnapshotScheduling::default()
+    };
+    assert!(pool.requires_selected_worker());
+    assert!(pool.allows_pool_launch("gha-aarch64-linux"));
+    assert!(!pool.allows_pool_launch("gha-x86_64-linux"));
+
+    let mut agent = SnapshotScheduling {
+      agent: Some(Uuid::new_v4()),
+      ..SnapshotScheduling::default()
+    };
+    assert!(agent.requires_selected_worker());
+    assert!(!agent.allows_pool_launch("gha-aarch64-linux"));
+    agent.fallback = true;
+    assert!(!agent.requires_selected_worker());
+    assert!(agent.allows_pool_launch("gha-aarch64-linux"));
   }
 
   fn agent_snapshot(

@@ -555,6 +555,7 @@ impl CommandRunner {
         termuxpp,
         pool,
         agent,
+        fallback,
         front,
         normal_priority,
       } => {
@@ -568,6 +569,7 @@ impl CommandRunner {
           ("termuxpp", termuxpp.to_string()),
           ("normal_priority", normal_priority.to_string()),
           ("front", front.to_string()),
+          ("fallback", fallback.to_string()),
         ];
         push_optional(&mut params, "pool", pool);
         push_optional(&mut params, "agent", agent.map(|id| id.to_string()));

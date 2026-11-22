@@ -117,6 +117,8 @@ struct SubmitSnapshotParams {
   pool:            Option<String>,
   agent:           Option<Uuid>,
   #[serde(default)]
+  fallback:        bool,
+  #[serde(default)]
   front:           bool,
 }
 
@@ -174,6 +176,11 @@ async fn submit_snapshot(
       "Choose either a pool or an agent".into(),
     )));
   }
+  if params.fallback && params.agent.is_none() {
+    return Err(ApiError(CiError::Validation(
+      "Fallback requires an exact agent".into(),
+    )));
+  }
   if params.front && params.normal_priority {
     return Err(ApiError(CiError::Validation(
       "Choose either front or normal priority".into(),
@@ -195,9 +202,10 @@ async fn submit_snapshot(
     repo::builder_sessions::get(&state.pool, agent).await?;
   }
   let scheduling = repo::evaluations::SnapshotScheduling {
-    pool:  params.pool,
-    agent: params.agent,
-    front: params.front,
+    pool:     params.pool,
+    agent:    params.agent,
+    front:    params.front,
+    fallback: params.fallback,
   };
   // Each submission has its own lifecycle, even for identical archives.
   let snapshot_id = Uuid::new_v4().simple().to_string();

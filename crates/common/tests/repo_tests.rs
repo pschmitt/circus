@@ -140,9 +140,10 @@ async fn snapshot_persists_request_with_evaluation() {
   let id = uuid::Uuid::new_v4().simple().to_string();
   let hosts = vec!["phone".to_string()];
   let scheduling = repo::evaluations::SnapshotScheduling {
-    pool:  Some("gha-aarch64-linux".to_owned()),
-    agent: None,
-    front: true,
+    pool:     Some("gha-aarch64-linux".to_owned()),
+    agent:    None,
+    front:    true,
+    fallback: false,
   };
   let evaluation = repo::evaluations::create_snapshot(
     &pool,
@@ -199,8 +200,23 @@ async fn snapshot_persists_request_with_evaluation() {
   repo::builds::bump_priority(&pool, ordinary_build.id, 1000)
     .await
     .expect("bump ordinary build");
-  let pending: Vec<_> = list_pending_x86(&pool, 512, 2)
+  let pending_without_pool = list_pending_x86(&pool, 512, 2).await;
+  assert!(!pending_without_pool.iter().any(|build| build.id == preferred_build.id));
+
+  let systems = ["x86_64-linux".to_owned()];
+  let venue = repo::builds::BuildVenue {
+    systems: &systems,
+    supported_features: &[],
+    mandatory_features: &[],
+    runs_systemless: false,
+    requires_trusted_ref: false,
+    verified_pr_evaluations: None,
+    machine_id: None,
+    ephemeral_agent_name: Some("gha-aarch64-linux-gh123.1-deadbeef"),
+  };
+  let pending: Vec<_> = repo::builds::list_pending(&pool, &[venue], None, 512, 2)
     .await
+    .expect("list builds with requested pool")
     .into_iter()
     .filter(|build| [ordinary.id, evaluation.id].contains(&build.evaluation_id))
     .map(|build| build.id)
@@ -284,6 +300,8 @@ async fn list_pending_x86(
     runs_systemless:      true,
     requires_trusted_ref: false,
     verified_pr_evaluations: None,
+    machine_id: None,
+    ephemeral_agent_name: None,
   };
   repo::builds::list_pending(pool, &[venue], None, limit, schedulable_capacity)
     .await
@@ -1863,6 +1881,8 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
     runs_systemless:      false,
     requires_trusted_ref: true,
     verified_pr_evaluations: None,
+    machine_id: None,
+    ephemeral_agent_name: None,
   };
   let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
     .await
@@ -1876,6 +1896,8 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
     runs_systemless:      false,
     requires_trusted_ref: false,
     verified_pr_evaluations: None,
+    machine_id: None,
+    ephemeral_agent_name: None,
   };
   let pending = repo::builds::list_pending(&pool, &[venue], None, 1, 1)
     .await
@@ -1889,6 +1911,8 @@ async fn test_trusted_venue_does_not_let_pr_build_starve_main() {
     runs_systemless:         false,
     requires_trusted_ref:    true,
     verified_pr_evaluations: Some(verified),
+    machine_id: None,
+    ephemeral_agent_name: None,
   };
   let pending =
     repo::builds::list_pending(&pool, &[pr_venue(vec![])], None, 2, 1)
