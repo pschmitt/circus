@@ -150,6 +150,7 @@ pub(in crate::routes::dashboard) async fn simple_page(
           </a>
           <nav aria-label="Account">
             <span class="simple-live"><span class="simple-live-dot" aria-hidden="true"></span>"Live"</span>
+            <a href="/builds">"Circus console"</a>
             if viewer.auth_name.is_empty() {
               <a href="/login">"Sign in"</a>
             } else {
