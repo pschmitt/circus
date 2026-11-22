@@ -1055,6 +1055,7 @@ pub async fn get_by_jobset_and_commit(
 /// listings without a per-build join.
 #[derive(Debug, Clone)]
 pub struct BuildContext {
+  pub is_snapshot:   bool,
   pub evaluation_id: Uuid,
   pub project_id:    Uuid,
   pub project_name:  String,
@@ -1084,6 +1085,7 @@ pub async fn get_build_contexts(
       .into_iter()
       .map(|r| {
         BuildContext {
+          is_snapshot:   r.is_snapshot,
           evaluation_id: r.evaluation_id,
           project_id:    r.project_id,
           project_name:  r.project_name,

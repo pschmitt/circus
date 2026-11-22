@@ -17,6 +17,7 @@ use circus_common::{
     BuildStatus,
     Evaluation,
     EvaluationStatus,
+    EvaluationTriggerKind,
     SortDirection,
     User,
   },
@@ -136,6 +137,7 @@ impl Pagination {
 // View models (pre-formatted for templates)
 
 pub(super) struct BuildView {
+  pub(super) is_snapshot:   bool,
   pub(super) id:            Uuid,
   pub(super) id_short:      String,
   pub(super) job_name:      String,
@@ -164,6 +166,7 @@ pub(super) struct BuildView {
 
 /// Queue page build info with elapsed time and builder details
 pub(super) struct QueueBuildView {
+  pub(super) is_snapshot:   bool,
   pub(super) id:            Uuid,
   pub(super) job_name:      String,
   pub(super) project_id:    Option<Uuid>,
@@ -185,6 +188,7 @@ pub(super) struct QueueBuildView {
 }
 
 pub(super) struct EvalView {
+  pub(super) is_snapshot:    bool,
   pub(super) id:             Uuid,
   pub(super) commit_hash:    String,
   pub(super) commit_short:   String,
@@ -229,6 +233,7 @@ pub(super) struct DiagnosticSegment {
 }
 
 pub(super) struct EvalSummaryView {
+  pub(super) is_snapshot:    bool,
   pub(super) id:             Uuid,
   pub(super) commit_short:   String,
   pub(super) commit_subject: String,
@@ -469,6 +474,7 @@ pub(super) struct WorkerSummaryView {
 impl From<&operator::OperatorBuild> for BuildView {
   fn from(b: &operator::OperatorBuild) -> Self {
     Self {
+      is_snapshot:   b.is_snapshot,
       id:            b.id,
       id_short:      short_uuid(b.id),
       job_name:      b.job_name.clone(),
@@ -858,6 +864,7 @@ impl From<&Build> for BuildView {
   fn from(b: &Build) -> Self {
     let (text, class) = b.status.badge();
     Self {
+      is_snapshot:   false,
       id:            b.id,
       id_short:      short_uuid(b.id),
       job_name:      b.job_name.clone(),
@@ -936,6 +943,7 @@ impl From<&Evaluation> for EvalView {
       e.commit_hash.clone()
     };
     Self {
+      is_snapshot:    e.trigger_kind == EvaluationTriggerKind::Snapshot,
       id:             e.id,
       commit_hash:    e.commit_hash.clone(),
       commit_short:   short,
@@ -1019,7 +1027,10 @@ pub(super) fn eval_view_with_context(
   let mut v = eval_view(e);
   v.jobset_name = jobset_name.to_string();
   v.project_name = project_name.to_string();
-  v.commit_url = repository_url.and_then(|url| commit_url(url, &e.commit_hash));
+  if !v.is_snapshot {
+    v.commit_url =
+      repository_url.and_then(|url| commit_url(url, &e.commit_hash));
+  }
   v
 }
 

@@ -109,9 +109,11 @@ async fn commit_cell(
   short: &str,
   subject: &str,
   url: Option<&str>,
+  is_snapshot: bool,
 ) -> Result<impl View> {
   Ok(view! {
     <td class="commit-cell">
+      if is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
       <a href=(format!("/evaluation/{id}"))>(short)</a>
       if !subject.is_empty() {
         match url {
@@ -477,6 +479,7 @@ async fn evaluations_list(
                       short: &e.commit_short,
                       subject: &e.commit_subject,
                       url: e.commit_url.as_deref(),
+                      is_snapshot: e.is_snapshot,
                     )
                     <td>(e.project_name.clone())</td>
                     <td>(e.jobset_name.clone())</td>
@@ -583,7 +586,13 @@ async fn load_evaluation(
   };
 
   let view = EvalView {
-    commit_url: commit_url(&project.repository_url, &eval.commit_hash),
+    commit_url: if eval.trigger_kind
+      == circus_common::models::EvaluationTriggerKind::Snapshot
+    {
+      None
+    } else {
+      commit_url(&project.repository_url, &eval.commit_hash)
+    },
     ..eval_view(&eval)
   };
 
@@ -628,7 +637,10 @@ async fn evaluation_page(cx: &Cx) -> Result<impl View> {
         <span class="sep">"/"</span>
         <span class="current">(data.eval.commit_short.clone())</span>
       </nav>
-      <h1>"Evaluation " (data.eval.commit_short.clone())</h1>
+      <h1>
+        "Evaluation " (data.eval.commit_short.clone())
+        if data.eval.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+      </h1>
       evaluation_body(id: id.to_string())
     )
   })
@@ -762,7 +774,7 @@ async fn evaluation_details(
         </div>
       }
       <div class="build-meta-item build-meta-wide">
-        <span class="build-meta-label">"Commit"</span>
+        <span class="build-meta-label">(if eval.is_snapshot { "Snapshot" } else { "Commit" })</span>
         <span class="build-meta-value">
           match eval.commit_url.as_deref() {
             Some(url) => <a class="commit-link" href=(url) rel="noopener noreferrer"><code>(eval.commit_hash.clone())</code></a>,
@@ -951,6 +963,8 @@ fn eval_summaries(
       };
 
       EvalSummaryView {
+        is_snapshot: e.trigger_kind
+          == circus_common::models::EvaluationTriggerKind::Snapshot,
         id: e.id,
         commit_short: short_commit(&e.commit_hash),
         commit_subject: e.commit_subject.clone().unwrap_or_default(),
@@ -1132,7 +1146,7 @@ async fn jobset_evaluations(cx: &Cx, id: String) -> Result<impl View> {
                 #[key(e.id.as_u128())]
                 for e in summaries.iter() {
                   <tr>
-                    commit_cell(id: e.id, short: &e.commit_short, subject: &e.commit_subject, url: None)
+                    commit_cell(id: e.id, short: &e.commit_short, subject: &e.commit_subject, url: None, is_snapshot: e.is_snapshot)
                     <td>status_badges(class: &e.status_class, text: &e.status_text, hidden: e.hidden)</td>
                     <td>(e.succeeded)</td>
                     <td>(e.failed)</td>

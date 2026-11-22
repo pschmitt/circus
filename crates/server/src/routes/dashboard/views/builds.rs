@@ -428,7 +428,10 @@ async fn recent_builds_table(
                   <td class="truncate" title=(build.project_name.clone())>
                     entity_link(kind: "project", id: build.project_id, name: build.project_name)
                   </td>
-                  <td class="mono truncate" title=(build.job_name.clone())>(build.job_name)</td>
+                  <td class="mono truncate" title=(build.job_name.clone())>
+                    if build.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+                    (build.job_name)
+                  </td>
                   <td class="mono nowrap">(build.system)</td>
                   <td>
                     <span class=(format!("status status-{}", build.status_class))>(build.status_text)</span>
@@ -709,47 +712,26 @@ async fn builds_table(
       .unwrap_or(0);
       let pagination = Pagination::new(total, offset, limit);
 
-      let mut context_by_eval = HashMap::new();
-      for item in &items {
-        if context_by_eval.contains_key(&item.evaluation_id) {
-          continue;
-        }
-
-        let Ok(eval) =
-          circus_common::repo::evaluations::get(&state.pool, item.evaluation_id)
-            .await
-        else {
-          continue;
-        };
-        let Ok(jobset) =
-          circus_common::repo::jobsets::get(&state.pool, eval.jobset_id).await
-        else {
-          continue;
-        };
-        let Ok(project) =
-          circus_common::repo::projects::get(&state.pool, jobset.project_id).await
-        else {
-          continue;
-        };
-        context_by_eval.insert(
-          item.evaluation_id,
-          (project.id, project.name, jobset.id, jobset.name),
-        );
-      }
+      let eval_ids: Vec<_> = items.iter().map(|item| item.evaluation_id).collect();
+      let context_by_eval: HashMap<_, _> =
+        circus_common::repo::evaluations::get_build_contexts(&state.pool, &eval_ids)
+          .await
+          .unwrap_or_default()
+          .into_iter()
+          .map(|ctx| (ctx.evaluation_id, ctx))
+          .collect();
 
       let rows: Vec<BuildView> = items
         .iter()
         .map(|item| {
           context_by_eval.get(&item.evaluation_id).map_or_else(
             || build_view(item),
-            |(project_id, project_name, jobset_id, jobset_name)| {
-              build_view_with_context(
-                item,
-                *project_id,
-                project_name,
-                *jobset_id,
-                jobset_name,
-              )
+            |ctx| {
+              let mut view = build_view_with_context(
+                item, ctx.project_id, &ctx.project_name, ctx.jobset_id, &ctx.jobset_name,
+              );
+              view.is_snapshot = ctx.is_snapshot;
+              view
             },
           )
         })
@@ -799,6 +781,7 @@ async fn builds_table(
                     entity_link(kind: "jobset", id: build.jobset_id, name: build.jobset_name)
                   </td>
                   <td class="mono truncate" title=(build.job_name.clone())>
+                    if build.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
                     <a href=(format!("/build/{}", build.id))>(build.job_name)</a>
                   </td>
                   <td class="mono nowrap">(build.system)</td>
@@ -835,6 +818,7 @@ async fn builds_table(
 }
 
 struct Lineage {
+  is_snapshot:  bool,
   eval_id:      Uuid,
   commit_short: String,
   jobset_id:    Uuid,
@@ -859,6 +843,8 @@ async fn lineage(state: &AppState, evaluation_id: Uuid) -> Result<Lineage> {
       .ok_or_not_found()?;
 
   Ok(Lineage {
+    is_snapshot:  eval.trigger_kind
+      == circus_common::models::EvaluationTriggerKind::Snapshot,
     eval_id:      eval.id,
     commit_short: eval.commit_hash.chars().take(12).collect(),
     jobset_id:    jobset.id,
@@ -918,7 +904,10 @@ async fn build_page(cx: &Cx) -> Result<impl View> {
         <span class="sep">"/"</span>
         <a href=(format!("/evaluation/{}", lineage.eval_id))>(lineage.commit_short.clone())</a>
       </nav>
-      <h1>"Build: " (build.job_name.clone())</h1>
+      <h1>
+        "Build: " (build.job_name.clone())
+        if lineage.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+      </h1>
       live_overview(id: id.to_string())
       <section class="panel build-detail-section">
         <div class="panel-header">
@@ -1336,7 +1325,8 @@ pub(in crate::routes::dashboard) async fn build_log_page(
   if !simple && log.is_none() {
     return Err(not_found().into());
   }
-  let build = build_view(&build);
+  let mut build = build_view(&build);
+  build.is_snapshot = lineage.is_snapshot;
   let title = format!("Log {}", build.job_name);
 
   Ok(view! {
@@ -1357,13 +1347,16 @@ pub(in crate::routes::dashboard) async fn build_log_page(
             } else {
               <section class="simple-section">
                 <div class="simple-section-heading">
-                  <h1 class="simple-project-title">(build.job_name.as_str())</h1>
+                  <h1 class="simple-project-title">
+                    (build.job_name.as_str())
+                    if build.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+                  </h1>
                   <span class=(format!("simple-status-label {}", build.status_class))>(build.status_text.as_str())</span>
                 </div>
                 <dl class="simple-detail-facts">
                   <div><dt>"Repository"</dt><dd>(lineage.project_name.as_str())</dd></div>
                   <div><dt>"System"</dt><dd>(build.system.as_str())</dd></div>
-                  <div><dt>"Commit"</dt><dd>(lineage.commit_short.as_str())</dd></div>
+                  <div><dt>(if lineage.is_snapshot { "Snapshot" } else { "Commit" })</dt><dd>(lineage.commit_short.as_str())</dd></div>
                 </dl>
                 if !build.error_message.is_empty() {
                   <pre class="simple-build-error">(build.error_message.as_str())</pre>
@@ -1407,7 +1400,10 @@ async fn live_log_page(details: &BuildView, id: Uuid) -> Result<impl View> {
   Ok(view! {
     <section class="log-stream live-build-log" aria-label="Live build log">
       <div class="log-pane-header">
-        <h2>"Live log stream"</h2>
+        <h2>
+          "Live log stream"
+          if details.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+        </h2>
         <span class=(format!("status status-{}", details.status_class))>(details.status_text.clone())</span>
       </div>
       <p class="live-log-status" data-build-log-status="">"Connecting to build log…"</p>
@@ -1431,6 +1427,7 @@ async fn log_page(
         <div class="build-log-kicker">"Build log"</div>
         <h1>(details.job_name.clone())</h1>
         <div class="build-log-meta">
+          if details.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
           <span class=(format!("status status-{}", details.status_class))>(details.status_text.clone())</span>
           <span>(details.system.clone())</span>
           if !details.duration.is_empty() {

@@ -295,7 +295,10 @@ async fn tables(
                 jobset_id: build.jobset_id,
                 jobset_name: &build.jobset_name,
               )
-              <td><a href=(format!("/build/{}", build.id))>(build.job_name.as_str())</a></td>
+              <td>
+                if build.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+                <a href=(format!("/build/{}", build.id))>(build.job_name.as_str())</a>
+              </td>
               <td>(build.system.as_str())</td>
               <td>(build.started_at.as_str())</td>
               <td>
@@ -344,7 +347,10 @@ async fn tables(
                 jobset_id: build.jobset_id,
                 jobset_name: &build.jobset_name,
               )
-              <td><a href=(format!("/build/{}", build.id))>(build.job_name.as_str())</a></td>
+              <td>
+                if build.is_snapshot { <span class="snapshot-badge">"Ad hoc"</span> }
+                <a href=(format!("/build/{}", build.id))>(build.job_name.as_str())</a>
+              </td>
               <td>(build.system.as_str())</td>
               <td>(build.priority)</td>
               <td>(build.created_at.as_str())</td>

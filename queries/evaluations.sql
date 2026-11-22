@@ -163,7 +163,8 @@ SELECT
   p.id AS project_id,
   p.name AS project_name,
   j.id AS jobset_id,
-  j.name AS jobset_name
+  j.name AS jobset_name,
+  e.trigger_kind = 'snapshot' AS is_snapshot
 FROM evaluations e
 JOIN jobsets j ON e.jobset_id = j.id
 JOIN projects p ON j.project_id = p.id

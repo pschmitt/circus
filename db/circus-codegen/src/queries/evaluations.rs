@@ -294,6 +294,7 @@ pub struct BuildContextRow {
     pub project_name: String,
     pub jobset_id: uuid::Uuid,
     pub jobset_name: String,
+    pub is_snapshot: bool,
 }
 pub struct BuildContextRowBorrowed<'a> {
     pub evaluation_id: uuid::Uuid,
@@ -301,6 +302,7 @@ pub struct BuildContextRowBorrowed<'a> {
     pub project_name: &'a str,
     pub jobset_id: uuid::Uuid,
     pub jobset_name: &'a str,
+    pub is_snapshot: bool,
 }
 impl<'a> From<BuildContextRowBorrowed<'a>> for BuildContextRow {
     fn from(
@@ -310,6 +312,7 @@ impl<'a> From<BuildContextRowBorrowed<'a>> for BuildContextRow {
             project_name,
             jobset_id,
             jobset_name,
+            is_snapshot,
         }: BuildContextRowBorrowed<'a>,
     ) -> Self {
         Self {
@@ -318,6 +321,7 @@ impl<'a> From<BuildContextRowBorrowed<'a>> for BuildContextRow {
             project_name: project_name.into(),
             jobset_id,
             jobset_name: jobset_name.into(),
+            is_snapshot,
         }
     }
 }
@@ -2000,7 +2004,7 @@ impl<'c, 'a, 's, C: GenericClient, T1: crate::StringSql>
 pub struct GetBuildContextsStmt(&'static str, Option<tokio_postgres::Statement>);
 pub fn get_build_contexts() -> GetBuildContextsStmt {
     GetBuildContextsStmt(
-        "SELECT e.id AS evaluation_id, p.id AS project_id, p.name AS project_name, j.id AS jobset_id, j.name AS jobset_name FROM evaluations e JOIN jobsets j ON e.jobset_id = j.id JOIN projects p ON j.project_id = p.id WHERE e.id = ANY($1)",
+        "SELECT e.id AS evaluation_id, p.id AS project_id, p.name AS project_name, j.id AS jobset_id, j.name AS jobset_name, e.trigger_kind = 'snapshot' AS is_snapshot FROM evaluations e JOIN jobsets j ON e.jobset_id = j.id JOIN projects p ON j.project_id = p.id WHERE e.id = ANY($1)",
         None,
     )
 }
@@ -2031,6 +2035,7 @@ impl GetBuildContextsStmt {
                     project_name: row.try_get(2)?,
                     jobset_id: row.try_get(3)?,
                     jobset_name: row.try_get(4)?,
+                    is_snapshot: row.try_get(5)?,
                 })
             },
             mapper: |it| BuildContextRow::from(it),

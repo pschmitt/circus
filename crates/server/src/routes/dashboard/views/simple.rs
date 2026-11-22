@@ -976,6 +976,9 @@ async fn simple_build_row(details: &BuildView) -> Result<impl View> {
             (details.project_name.as_str()) " / "
           }
           (details.system.as_str())
+          if details.is_snapshot {
+            <span class="snapshot-badge">"Ad hoc"</span>
+          }
         </span>
       </div>
       <span class=(format!("simple-status-label {}", details.status_class))>(details.status_text.as_str())</span>

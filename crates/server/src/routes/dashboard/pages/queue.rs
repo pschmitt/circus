@@ -69,38 +69,33 @@ pub(in crate::routes::dashboard) async fn load(
         HashMap::new()
       });
 
-  let mut context_by_eval: HashMap<Uuid, (Uuid, String, Uuid, String)> =
-    HashMap::new();
-  for b in running.iter().chain(pending.iter()) {
-    if context_by_eval.contains_key(&b.evaluation_id) {
-      continue;
-    }
-    let Ok(eval) =
-      circus_common::repo::evaluations::get(&state.pool, b.evaluation_id).await
-    else {
-      continue;
-    };
-    let Ok(jobset) =
-      circus_common::repo::jobsets::get(&state.pool, eval.jobset_id).await
-    else {
-      continue;
-    };
-    let Ok(project) =
-      circus_common::repo::projects::get(&state.pool, jobset.project_id).await
-    else {
-      continue;
-    };
-    context_by_eval.insert(
-      b.evaluation_id,
-      (project.id, project.name, jobset.id, jobset.name),
-    );
-  }
+  let eval_ids: Vec<_> = running
+    .iter()
+    .chain(&pending)
+    .map(|build| build.evaluation_id)
+    .collect();
+  let context_by_eval: HashMap<_, _> =
+    circus_common::repo::evaluations::get_build_contexts(
+      &state.pool,
+      &eval_ids,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|ctx| (ctx.evaluation_id, ctx))
+    .collect();
 
   let context_for = |b: &Build| {
     context_by_eval.get(&b.evaluation_id).map_or_else(
-      || (None, String::new(), None, String::new()),
-      |(pid, pname, jid, jname)| {
-        (Some(*pid), pname.clone(), Some(*jid), jname.clone())
+      || (None, String::new(), None, String::new(), false),
+      |ctx| {
+        (
+          Some(ctx.project_id),
+          ctx.project_name.clone(),
+          Some(ctx.jobset_id),
+          ctx.jobset_name.clone(),
+          ctx.is_snapshot,
+        )
       },
     )
   };
@@ -114,8 +109,10 @@ pub(in crate::routes::dashboard) async fn load(
       let builder_name = b
         .agent_machine_id
         .and_then(|id| agent_map.get(&id).cloned());
-      let (project_id, project_name, jobset_id, jobset_name) = context_for(b);
+      let (project_id, project_name, jobset_id, jobset_name, is_snapshot) =
+        context_for(b);
       QueueBuildView {
+        is_snapshot,
         id: b.id,
         job_name: b.job_name.clone(),
         project_id,
@@ -145,8 +142,10 @@ pub(in crate::routes::dashboard) async fn load(
     .iter()
     .enumerate()
     .map(|(idx, b)| {
-      let (project_id, project_name, jobset_id, jobset_name) = context_for(b);
+      let (project_id, project_name, jobset_id, jobset_name, is_snapshot) =
+        context_for(b);
       QueueBuildView {
+        is_snapshot,
         id: b.id,
         job_name: b.job_name.clone(),
         project_id,

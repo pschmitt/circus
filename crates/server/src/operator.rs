@@ -31,6 +31,7 @@ pub struct OperatorOverview {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorBuild {
+  pub is_snapshot:   bool,
   pub id:            Uuid,
   pub job_name:      String,
   pub project_id:    Option<Uuid>,
@@ -73,6 +74,7 @@ impl OperatorBuild {
 
     Self {
       id: b.id,
+      is_snapshot: context.is_some_and(|ctx| ctx.is_snapshot),
       job_name: b.job_name.clone(),
       project_id,
       project_name,
@@ -563,6 +565,7 @@ pub async fn worker_summary(state: &AppState) -> Result<Vec<OperatorWorker>> {
 
 #[derive(Clone)]
 struct BuildContext {
+  is_snapshot:  bool,
   project_id:   Uuid,
   project_name: String,
   jobset_id:    Uuid,
@@ -595,6 +598,7 @@ async fn context_for_builds<'a>(
       .into_iter()
       .map(|row| {
         (row.evaluation_id, BuildContext {
+          is_snapshot:  row.is_snapshot,
           project_id:   row.project_id,
           project_name: row.project_name,
           jobset_id:    row.jobset_id,

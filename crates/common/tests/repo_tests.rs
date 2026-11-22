@@ -159,6 +159,11 @@ async fn snapshot_persists_request_with_evaluation() {
   .expect("create snapshot");
   assert_eq!(evaluation.trigger_kind, EvaluationTriggerKind::Snapshot);
   assert_eq!(evaluation.status, EvaluationStatus::Pending);
+  let contexts = repo::evaluations::get_build_contexts(
+    &pool, &[ordinary.id, evaluation.id],
+  ).await.expect("load build origins");
+  assert_eq!(contexts.len(), 2);
+  assert!(contexts.iter().all(|ctx| ctx.is_snapshot == (ctx.evaluation_id == evaluation.id)));
   let snapshot = repo::evaluations::get_snapshot(&pool, evaluation.id)
     .await
     .expect("load snapshot")
