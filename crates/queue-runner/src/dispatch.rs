@@ -170,6 +170,7 @@ pub(crate) async fn trusted_build_github_repository(
 fn candidate_allowed_for_trusted_build(
   agent: &AgentSnapshot,
   trusted: Option<&TrustedBuildContext>,
+  agent_pool: &crate::rpc::pool::AgentPool,
 ) -> bool {
   if !agent.requires_trusted_ref() {
     return true;
@@ -177,11 +178,17 @@ fn candidate_allowed_for_trusted_build(
   let Some(trusted) = trusted else {
     return false;
   };
-  // OIDC agents are pinned to their token repo
+  let Some(repository) = trusted.repository.as_deref() else {
+    return false;
+  };
+  if let Some(allowed) = agent_pool.trusted_pool_allows(agent, repository) {
+    return allowed;
+  }
+  // Other OIDC agents remain pinned to their token repository.
   agent
     .oidc_repository
     .as_deref()
-    .is_some_and(|repo| trusted.repository.as_deref() == Some(repo))
+    .is_some_and(|repo| repo == repository)
 }
 
 #[must_use]
@@ -447,16 +454,19 @@ async fn select_and_reserve_agent(
       if let Some(verified) = ctx.agent_pool.verified_pr_evaluations(snap) {
         return verified.binary_search(&build.evaluation_id).is_ok();
       }
-      candidate_allowed_for_trusted_build(snap, trusted.as_ref())
-        && ctx.qemu_overflow.as_ref().is_none_or(|(overflow, repos)| {
-          !is_qemu_overflow_agent(&snap.name, overflow)
-            || trusted
-              .as_ref()
-              .and_then(|context| context.repository.as_deref())
-              .is_some_and(|repository| {
-                repos.iter().any(|allowed| allowed == repository)
-              })
-        })
+      candidate_allowed_for_trusted_build(
+        snap,
+        trusted.as_ref(),
+        &ctx.agent_pool,
+      ) && ctx.qemu_overflow.as_ref().is_none_or(|(overflow, repos)| {
+        !is_qemu_overflow_agent(&snap.name, overflow)
+          || trusted
+            .as_ref()
+            .and_then(|context| context.repository.as_deref())
+            .is_some_and(|repository| {
+              repos.iter().any(|allowed| allowed == repository)
+            })
+      })
     });
     if candidates.is_empty() {
       tracing::debug!(
@@ -600,7 +610,10 @@ fn snapshot_pool_name_matches(agent: &str, pool: &str) -> bool {
       .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn agent_name_matches_pool(agent_name: &str, pool_name: &str) -> bool {
+pub(crate) fn agent_name_matches_pool(
+  agent_name: &str,
+  pool_name: &str,
+) -> bool {
   agent_name == pool_name
     || agent_name
       .strip_prefix(pool_name)
@@ -1191,6 +1204,7 @@ mod tests {
 
   #[test]
   fn oidc_agent_must_match_project_repository() {
+    let pool = crate::rpc::pool::AgentPool::new();
     let trusted = super::TrustedBuildContext {
       repository: Some("owner/repo".into()),
     };
@@ -1201,17 +1215,78 @@ mod tests {
 
     assert!(candidate_allowed_for_trusted_build(
       &matching,
-      Some(&trusted)
+      Some(&trusted),
+      &pool
     ));
     assert!(!candidate_allowed_for_trusted_build(
       &other_repo,
-      Some(&trusted)
+      Some(&trusted),
+      &pool
     ));
     assert!(candidate_allowed_for_trusted_build(
       &token_ephemeral,
-      Some(&trusted)
+      Some(&trusted),
+      &pool
     ));
-    assert!(candidate_allowed_for_trusted_build(&persistent, None));
+    assert!(candidate_allowed_for_trusted_build(
+      &persistent,
+      None,
+      &pool
+    ));
+  }
+
+  #[test]
+  fn configured_oidc_pool_accepts_only_allowed_trusted_repositories() {
+    let pool = crate::rpc::pool::AgentPool::new();
+    let mut config = circus_config::EphemeralPoolConfig::default();
+    config.name = "gha-arm".into();
+    config.github_actions.workflow_repository = "owner/runner".into();
+    config.github_actions.workflow = "builder.yml".into();
+    config.github_actions.ref_name = "main".into();
+    config.allowed_build_repositories = strs(&["owner/project"]);
+    pool.configure_trusted_pool(&config);
+    let mut agent = agent_snapshot(true, AuthKind::Oidc, Some("owner/runner"));
+    agent.name = "gha-arm-123".into();
+    agent.oidc_workflow_ref =
+      Some("owner/runner/.github/workflows/builder.yml@refs/heads/main".into());
+    let allowed = super::TrustedBuildContext {
+      repository: Some("owner/project".into()),
+    };
+    let denied = super::TrustedBuildContext {
+      repository: Some("owner/other".into()),
+    };
+    assert!(candidate_allowed_for_trusted_build(
+      &agent,
+      Some(&allowed),
+      &pool
+    ));
+    assert!(!candidate_allowed_for_trusted_build(
+      &agent,
+      Some(&denied),
+      &pool
+    ));
+    assert!(!candidate_allowed_for_trusted_build(&agent, None, &pool));
+    agent.name = "wrong-pool-123".into();
+    assert!(!candidate_allowed_for_trusted_build(
+      &agent,
+      Some(&allowed),
+      &pool
+    ));
+    agent.name = "gha-arm-123".into();
+    agent.oidc_repository = Some("owner/impostor".into());
+    assert!(!candidate_allowed_for_trusted_build(
+      &agent,
+      Some(&allowed),
+      &pool
+    ));
+    agent.oidc_repository = Some("owner/runner".into());
+    agent.oidc_workflow_ref =
+      Some("owner/runner/.github/workflows/other.yml@refs/heads/main".into());
+    assert!(!candidate_allowed_for_trusted_build(
+      &agent,
+      Some(&allowed),
+      &pool
+    ));
   }
 
   #[test]

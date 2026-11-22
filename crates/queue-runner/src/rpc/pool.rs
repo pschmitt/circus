@@ -310,19 +310,68 @@ impl AgentSnapshot {
 
 #[derive(Default)]
 pub struct AgentPool {
-  inner:       RwLock<HashMap<Uuid, Arc<AgentMeta>>>,
+  inner:         RwLock<HashMap<Uuid, Arc<AgentMeta>>>,
   /// Machines whose registration is between its checks and its insert.
-  registering: parking_lot::Mutex<HashSet<Uuid>>,
-  pr_workflows: RwLock<HashMap<String, VerifiedPullRequests>>,
+  registering:   parking_lot::Mutex<HashSet<Uuid>>,
+  pr_workflows:  RwLock<HashMap<String, VerifiedPullRequests>>,
+  trusted_pools: RwLock<Vec<TrustedPool>>,
+}
+
+struct TrustedPool {
+  name:                 String,
+  workflow_ref:         String,
+  workflow_repository:  String,
+  allowed_repositories: Vec<String>,
 }
 
 #[derive(Default)]
 struct VerifiedPullRequests {
   evaluations: Vec<Uuid>,
-  expires_at: Option<Instant>,
+  expires_at:  Option<Instant>,
 }
 
 impl AgentPool {
+  pub(crate) fn configure_trusted_pool(
+    &self,
+    config: &circus_config::EphemeralPoolConfig,
+  ) {
+    let workflow = &config.github_actions;
+    self.trusted_pools.write().push(TrustedPool {
+      name:                 config.name.clone(),
+      workflow_ref:         format!(
+        "{}/.github/workflows/{}@refs/heads/{}",
+        workflow.workflow_repository, workflow.workflow, workflow.ref_name
+      ),
+      workflow_repository:  workflow.workflow_repository.clone(),
+      allowed_repositories: config.allowed_build_repositories.clone(),
+    });
+  }
+
+  /// `None` means the workflow is not a configured trusted pool.
+  pub(crate) fn trusted_pool_allows(
+    &self,
+    agent: &AgentSnapshot,
+    repository: &str,
+  ) -> Option<bool> {
+    let workflow = agent.oidc_workflow_ref.as_deref()?;
+    let pools = self.trusted_pools.read();
+    let mut matching =
+      pools.iter().filter(|pool| pool.workflow_ref == workflow);
+    let first = matching.next()?;
+    let allows = |pool: &TrustedPool| {
+      agent.ephemeral
+        && agent.auth_kind == circus_common::models::AuthKind::Oidc
+        && agent.oidc_repository.as_deref()
+          == Some(pool.workflow_repository.as_str())
+        && crate::dispatch::agent_name_matches_pool(&agent.name, &pool.name)
+        && pool
+          .allowed_repositories
+          .iter()
+          .any(|allowed| allowed == repository)
+    };
+    Some(allows(first) || matching.any(allows))
+  }
+
   pub(crate) fn configure_pr_workflow(&self, workflow_ref: String) {
     self.pr_workflows.write().entry(workflow_ref).or_default();
   }
@@ -350,11 +399,16 @@ impl AgentPool {
     let workflow_ref = agent.oidc_workflow_ref.as_deref()?;
     let workflows = self.pr_workflows.read();
     let verified = workflows.get(workflow_ref)?;
-    Some(if verified.expires_at.is_some_and(|expiry| Instant::now() < expiry) {
-      verified.evaluations.clone()
-    } else {
-      Vec::new()
-    })
+    Some(
+      if verified
+        .expires_at
+        .is_some_and(|expiry| Instant::now() < expiry)
+      {
+        verified.evaluations.clone()
+      } else {
+        Vec::new()
+      },
+    )
   }
 }
 

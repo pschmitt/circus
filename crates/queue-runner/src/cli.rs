@@ -180,7 +180,16 @@ where
   // is started further down; agents that register before the listener is
   // up simply reconnect via their supervisor loop.
   let agent_pool = AgentPool::new();
-  for workflow_ref in ephemeral_pools.iter().filter_map(EphemeralPoolConfig::pull_request_workflow_ref) {
+  for pool in ephemeral_pools
+    .iter()
+    .filter(|pool| !pool.is_pull_request_pool())
+  {
+    agent_pool.configure_trusted_pool(pool);
+  }
+  for workflow_ref in ephemeral_pools
+    .iter()
+    .filter_map(EphemeralPoolConfig::pull_request_workflow_ref)
+  {
     agent_pool.configure_pr_workflow(workflow_ref);
   }
   let heartbeat_ttl = qr_config.rpc.as_ref().map_or_else(
