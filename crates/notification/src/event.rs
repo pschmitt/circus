@@ -260,6 +260,8 @@ pub struct EvaluationEvent {
   pub jobset_name:       String,
   pub commit_hash:       String,
   pub evaluation_status: EvaluationStatus,
+  #[serde(default)]
+  pub evaluation_error:  Option<String>,
   /// The branch the evaluation is for: the pull request's head branch, else
   /// the jobset's branch.
   pub branch:            Option<String>,
@@ -270,6 +272,36 @@ pub struct EvaluationEvent {
 }
 
 impl EvaluationEvent {
+  /// A fail-closed GitHub release status for the complete default-branch
+  /// jobset.
+  #[must_use]
+  pub fn github_jobset_status(&self) -> Option<&'static str> {
+    if self.pr_number.is_some() || self.superseded_by.is_some() {
+      return None;
+    }
+    match self.evaluation_status {
+      EvaluationStatus::Running if self.jobs.total == 0 => Some("pending"),
+      EvaluationStatus::Pending | EvaluationStatus::Running => None,
+      EvaluationStatus::Completed if self.evaluation_error.is_some() => {
+        Some("failure")
+      },
+      EvaluationStatus::Completed
+        if self.jobs.pending > 0 || self.jobs.running > 0 =>
+      {
+        None
+      },
+      EvaluationStatus::Completed
+        if self.jobs.total > 0 && self.jobs.status() == "success" =>
+      {
+        Some("success")
+      },
+      EvaluationStatus::Completed
+      | EvaluationStatus::Failed
+      | EvaluationStatus::Cancelled
+      | EvaluationStatus::TimedOut => Some("failure"),
+    }
+  }
+
   /// The JSON body of the generic webhook for this event.
   #[must_use]
   pub fn webhook_payload(&self) -> serde_json::Value {
@@ -353,6 +385,48 @@ mod evaluation_tests {
   }
 
   #[test]
+  fn release_status_never_succeeds_before_evaluation_and_jobs_complete() {
+    let mut event = EvaluationEvent {
+      evaluation_id:     Uuid::nil(),
+      project_name:      "p".into(),
+      project_url:       "https://github.com/o/r".into(),
+      jobset_name:       "main-arm".into(),
+      commit_hash:       "abc".into(),
+      evaluation_status: EvaluationStatus::Running,
+      evaluation_error:  None,
+      branch:            Some("main".into()),
+      pr_number:         None,
+      source_scope:      None,
+      superseded_by:     None,
+      jobs:              JobSummary::default(),
+    };
+    assert_eq!(event.github_jobset_status(), Some("pending"));
+    event.evaluation_status = EvaluationStatus::Completed;
+    assert_eq!(event.github_jobset_status(), Some("failure"));
+    event.jobs = JobSummary::from_counts_including_pending(&[
+      (BuildStatus::Succeeded, 1),
+      (BuildStatus::Running, 1),
+    ]);
+    assert_eq!(event.github_jobset_status(), None);
+    event.jobs =
+      JobSummary::from_counts_including_pending(&[(BuildStatus::Succeeded, 2)]);
+    assert_eq!(event.github_jobset_status(), Some("success"));
+    event.evaluation_error = Some("1 attribute failed".into());
+    assert_eq!(event.github_jobset_status(), Some("failure"));
+    event.evaluation_error = None;
+    event.jobs =
+      JobSummary::from_counts_including_pending(&[(BuildStatus::Failed, 1)]);
+    assert_eq!(event.github_jobset_status(), Some("failure"));
+    event.evaluation_status = EvaluationStatus::Failed;
+    assert_eq!(event.github_jobset_status(), Some("failure"));
+    event.pr_number = Some(12);
+    assert_eq!(event.github_jobset_status(), None);
+    event.pr_number = None;
+    event.superseded_by = Some(Uuid::nil());
+    assert_eq!(event.github_jobset_status(), None);
+  }
+
+  #[test]
   fn payload_is_tagged() {
     let event = EvaluationEvent {
       evaluation_id:     Uuid::nil(),
@@ -361,6 +435,7 @@ mod evaluation_tests {
       jobset_name:       "main".into(),
       commit_hash:       "abc".into(),
       evaluation_status: EvaluationStatus::Completed,
+      evaluation_error:  None,
       branch:            Some("main".into()),
       pr_number:         None,
       source_scope:      None,

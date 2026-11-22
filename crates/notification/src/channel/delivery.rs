@@ -523,6 +523,44 @@ impl Notifier for GithubStatusChannel {
   }
 }
 
+impl GithubStatusChannel {
+  pub async fn deliver_jobset_status(
+    &self,
+    event: &EvaluationEvent,
+    state: &str,
+    origin: Origin,
+  ) -> Result<(), String> {
+    let (owner, repo) =
+      parse_github_repo(&event.project_url).ok_or_else(|| {
+        format!("Cannot parse GitHub repo from {}", event.project_url)
+      })?;
+    let url = format!(
+      "https://api.github.com/repos/{owner}/{repo}/statuses/{}",
+      event.commit_hash
+    );
+    let body = serde_json::json!({
+      "state": state,
+      "description": "Circus jobset evaluation and builds",
+      "context": format!("circus/jobset/{}", event.jobset_name),
+    });
+    let resp = crate::http_client(origin)
+      .post(&url)
+      .bearer_auth(&self.token)
+      .header("Accept", "application/vnd.github+json")
+      .header("X-GitHub-Api-Version", circus_http::GITHUB_API_VERSION)
+      .json(&body)
+      .send_checked()
+      .await
+      .map_err(|e| {
+        format!("GitHub jobset status failed: {}", ErrorChain(&e))
+      })?;
+    let rate_limit =
+      super::super::extract_rate_limit_from_headers(resp.headers());
+    super::super::apply_github_rate_limit(rate_limit).await;
+    Ok(())
+  }
+}
+
 impl Notifier for GiteaStatusChannel {
   fn applies_to(&self, _event: &BuildEvent) -> bool {
     true
@@ -787,6 +825,7 @@ mod pr_comment_tests {
       jobset_name: "pr".into(),
       commit_hash: "0123456789abcdef".into(),
       evaluation_status: EvaluationStatus::Completed,
+      evaluation_error: None,
       branch: Some("feature".into()),
       pr_number: Some(12),
       source_scope: None,

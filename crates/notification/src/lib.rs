@@ -492,12 +492,32 @@ pub async fn dispatch_evaluation_update(
       },
     }
   }
+  let channels =
+    resolve_channels(Some(pool), &project, config, encryption_key).await;
+  if let Some(state) = event.github_jobset_status() {
+    for (channel, origin) in &channels {
+      if let NotificationChannel::GithubStatus(github) = channel {
+        let mut delay = Duration::from_secs(1);
+        for attempt in 1..=3 {
+          match github.deliver_jobset_status(&event, state, *origin).await {
+            Ok(()) => break,
+            Err(error) if attempt < 3 => {
+              warn!(%evaluation_id, attempt, "GitHub jobset status update failed: {error}");
+              tokio::time::sleep(delay).await;
+              delay *= 3;
+            },
+            Err(error) => {
+              error!(%evaluation_id, "GitHub jobset status update failed: {error}");
+            },
+          }
+        }
+      }
+    }
+  }
   if event.evaluation_status != EvaluationStatus::Completed {
     return;
   }
-  for (channel, origin) in
-    resolve_channels(Some(pool), &project, config, encryption_key).await
-  {
+  for (channel, origin) in channels {
     let NotificationChannel::Webhook(webhook) = &channel else {
       continue;
     };
@@ -544,6 +564,7 @@ async fn evaluation_event(
     jobset_name: jobset.name,
     commit_hash: evaluation.commit_hash,
     evaluation_status: evaluation.status,
+    evaluation_error: evaluation.error_message,
     branch: evaluation.pr_head_branch.or(jobset.branch),
     pr_number: evaluation.pr_number,
     source_scope: evaluation.source_scope,

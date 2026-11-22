@@ -851,7 +851,10 @@ async fn run_nix_and_record_builds(
           "Evaluation discovered jobs"
       );
 
-      if !stream.complete().await? {
+      let evaluation_error = (eval_result.error_count > 0).then(|| {
+        format!("{} attributes failed to evaluate", eval_result.error_count)
+      });
+      if !stream.complete(evaluation_error.as_deref()).await? {
         tracing::info!(eval_id = %eval.id, "Evaluation was cancelled");
         return Ok(());
       }

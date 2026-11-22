@@ -529,7 +529,7 @@ impl<'a> BuildStream<'a> {
     let (aggregates, jobs): (Vec<_>, Vec<_>) =
       jobs.into_iter().partition(|job| job.constituents.is_some());
     self.aggregates.extend(aggregates);
-    self.persist(jobs, false).await
+    self.persist(jobs, false, None).await
   }
 
   /// Record the aggregates and mark the evaluation completed.
@@ -537,9 +537,15 @@ impl<'a> BuildStream<'a> {
   /// # Returns
   ///
   /// `false` if the evaluation stopped running first.
-  pub(crate) async fn complete(mut self) -> misstep::Result<bool> {
+  pub(crate) async fn complete(
+    mut self,
+    evaluation_error: Option<&str>,
+  ) -> misstep::Result<bool> {
     let aggregates = std::mem::take(&mut self.aggregates);
-    let completed = self.persist(aggregates, true).await?.is_some();
+    let completed = self
+      .persist(aggregates, true, evaluation_error)
+      .await?
+      .is_some();
     if self.dropped > 0 {
       tracing::info!(
         dropped = self.dropped,
@@ -632,6 +638,7 @@ impl<'a> BuildStream<'a> {
     &mut self,
     jobs: Vec<NixJob>,
     finish: bool,
+    evaluation_error: Option<&str>,
   ) -> misstep::Result<Option<Vec<Build>>> {
     // A restart keeps running and succeeded builds, which only stand in for a
     // job whose derivation is unchanged.
@@ -771,7 +778,7 @@ impl<'a> BuildStream<'a> {
         &tx,
         self.eval_id,
         EvaluationStatus::Completed,
-        None,
+        evaluation_error,
       )
       .await?;
       if !finished {
@@ -1042,7 +1049,12 @@ mod tests {
       .expect("running");
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].drv_path, app);
-    assert!(stream.complete().await.expect("complete"));
+    assert!(
+      stream
+        .complete(Some("1 attribute failed to evaluate"))
+        .await
+        .expect("complete")
+    );
 
     let ids = repo::builds::list_for_evaluation(&pool, eval_id)
       .await
@@ -1054,6 +1066,13 @@ mod tests {
     assert!(ids.contains(&kept_dep));
     assert!(!ids.contains(&stale));
     assert!(!ids.contains(&dropped));
+    let evaluation = repo::evaluations::get(&pool, eval_id)
+      .await
+      .expect("get evaluation");
+    assert_eq!(
+      evaluation.error_message.as_deref(),
+      Some("1 attribute failed to evaluate")
+    );
   }
 
   #[tokio::test]
@@ -1075,7 +1094,7 @@ mod tests {
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].job_name, "a");
 
-    assert!(stream.complete().await.expect("complete"));
+    assert!(stream.complete(None).await.expect("complete"));
 
     let builds = repo::builds::list_for_evaluation(&pool, eval_id)
       .await
