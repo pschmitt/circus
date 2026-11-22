@@ -324,6 +324,25 @@
           '';
       });
 
+    hydraJobs = lib.genAttrs ["x86_64-linux" "aarch64-linux"] (system:
+      {
+        packages = {
+          inherit
+            (self.packages.${system})
+            circus-agent
+            circus-agent-static
+            circus-cli
+            circus-evaluator
+            circus-queue-runner
+            circus-server
+            ;
+        };
+      }
+      // lib.optionalAttrs (system == "x86_64-linux") {
+        # The VM tests are individual jobs. The aggregate only combines their outputs.
+        checks = builtins.removeAttrs self.checks.${system} ["full"];
+      });
+
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
     in {
