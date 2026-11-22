@@ -1,18 +1,14 @@
-# pschmitt fork: publish a statically linked aarch64 circus-agent for the
-# ephemeral GitHub Actions agents of pschmitt/nixos-config (its
-# circus-builder.yml downloads it by URL and checks the sha256). Built on a
-# native arm runner, because the flake's circus-agent-static cross target
-# follows the build host's system.
 name: Release aarch64 agent
 
 on:
   push:
     tags:
       - "v*-pschmitt.*"
+  status:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to (re)build and attach the agent to
+        description: Existing tag to attach the agent to
         required: true
         type: string
 
@@ -23,47 +19,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build static aarch64 circus-agent
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+  gate:
+    if: github.event_name != 'status' || (github.event.context == 'circus/artifacts' && github.event.state == 'success' && github.event.sha == github.sha)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+      tags: ${{ steps.gate.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test release gate
+        run: python3 -m unittest discover -s .github/scripts -p test_circus_static_release_ready.py
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: bash .github/scripts/circus-static-release-ready.sh
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        tag: ${{ fromJSON(needs.gate.outputs.tags) }}
     permissions:
       contents: write
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ matrix.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ matrix.tag }}
           persist-credentials: false
-
-      - name: Install Nix
-        uses: pschmitt/ci-workflows/.github/actions/nix-setup@main
-
-      - name: Build
-        run: nix build .#circus-agent-static -L
-
+      - uses: pschmitt/ci-workflows/.github/actions/nix-niks3@main
+        with:
+          s3-store: ${{ secrets.NIKS3_S3_STORE }}
+          s3-access-key: ${{ secrets.NIKS3_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.NIKS3_S3_SECRET_KEY }}
+      - name: Fetch Circus artifact
+        run: nix --option max-jobs 0 --option builders '' --option fallback false --option allow-import-from-derivation false build -L '.#packages.aarch64-linux.circus-agent-static'
       - name: Package
         run: |
           set -euo pipefail
           install -m 0755 result/bin/circus-agent circus-agent-aarch64-linux
-          file circus-agent-aarch64-linux
-          if file circus-agent-aarch64-linux | grep -q 'dynamically linked'
-          then
-            echo "::error::circus-agent is not statically linked"
+          file circus-agent-aarch64-linux | grep -q 'aarch64'
+          if file circus-agent-aarch64-linux | grep -q 'dynamically linked'; then
+            echo '::error::circus-agent is not statically linked'
             exit 1
           fi
           sha256sum circus-agent-aarch64-linux > circus-agent-aarch64-linux.sha256
-          cat circus-agent-aarch64-linux.sha256
-
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
-          then
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
               --verify-tag --title "$TAG" \
               --notes "Static aarch64 circus-agent built from the pschmitt fork at ${TAG}."

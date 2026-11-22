@@ -9,6 +9,7 @@ import unittest
 SCRIPT = Path(__file__).with_name("circus-release-gate.sh")
 MAIN = {"context": "circus/jobset/main", "state": "success"}
 ARM = {"context": "circus/jobset/main-arm", "state": "success"}
+ARTIFACTS = {"context": "circus/artifacts", "state": "success"}
 SUCCESS = {"status": "completed", "conclusion": "success"}
 
 
@@ -28,14 +29,16 @@ class CircusReleaseGateTest(unittest.TestCase):
             return output.read_text().strip()
 
     def test_release_requires_both_jobsets_and_successful_github_ci(self):
-        self.assertEqual(self.run_gate([MAIN, ARM], [SUCCESS]), "ready=true")
-        self.assertEqual(self.run_gate([MAIN], [SUCCESS]), "ready=false")
-        self.assertEqual(self.run_gate([MAIN, ARM | {"state": "pending"}], [SUCCESS]), "ready=false")
-        self.assertEqual(self.run_gate([MAIN, ARM], []), "ready=false")
-        self.assertEqual(self.run_gate([MAIN, ARM], [SUCCESS | {"conclusion": "failure"}, SUCCESS]), "ready=false")
+        self.assertEqual(self.run_gate([MAIN, ARM, ARTIFACTS], [SUCCESS]), "ready=true")
+        self.assertEqual(self.run_gate([MAIN, ARM], [SUCCESS]), "ready=false")
+        self.assertEqual(self.run_gate([MAIN, ARTIFACTS], [SUCCESS]), "ready=false")
+        self.assertEqual(self.run_gate([MAIN, ARM | {"state": "pending"}, ARTIFACTS], [SUCCESS]), "ready=false")
+        self.assertEqual(self.run_gate([MAIN, ARM, ARTIFACTS], []), "ready=false")
+        self.assertEqual(self.run_gate([MAIN, ARM, ARTIFACTS], [SUCCESS | {"conclusion": "failure"}, SUCCESS]), "ready=false")
 
     def test_manual_dispatch_remains_available(self):
-        self.assertEqual(self.run_gate([], [], event="workflow_dispatch"), "ready=true")
+        self.assertEqual(self.run_gate([], [], event="workflow_dispatch"), "ready=false")
+        self.assertEqual(self.run_gate([ARTIFACTS], [], event="workflow_dispatch"), "ready=true")
 
 
 if __name__ == "__main__":
