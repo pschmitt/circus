@@ -6,6 +6,7 @@ on:
     workflows: [CI]
     types: [completed]
     branches: [main]
+  status:
 
 permissions: {}
 
@@ -14,13 +15,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    name: Check Circus and GitHub CI
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha) || (github.event_name == 'status' && (github.event.context == 'circus/jobset/main' || github.event.context == 'circus/jobset/main-arm') && github.event.state == 'success' && github.event.sha == github.sha) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      statuses: read
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test release gate
+        run: python3 -m unittest discover -s .github/scripts -p test_circus_release_gate.py
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: bash .github/scripts/circus-release-gate.sh
+
   prepare:
     name: Prepare Release
     permissions:
       contents: write
       id-token: write
       attestations: write
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    needs: gate
+    if: ${{ needs.gate.outputs.ready == 'true' }}
     uses: manic-systems/workflows/.github/workflows/rust-release.yml@cbe0792d849aef0dbad4d2bde960b110761ed905 # v2.1.1
     with:
       # The reusable workflow marks semver tags with suffixes as prereleases.
