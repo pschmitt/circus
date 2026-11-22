@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: pschmitt/ci-workflows/.github/actions/nix-setup@main
 
       - name: Build
         run: nix build .#circus-agent-static -L
