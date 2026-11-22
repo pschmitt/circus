@@ -443,19 +443,20 @@ fn resolve_dependency_pairs(
 /// Aggregates wait for [`BuildStream::complete`] because their constituents can
 /// arrive in any later batch.
 pub(crate) struct BuildStream<'a> {
-  pool:            &'a PgPool,
-  eval_id:         Uuid,
-  memory_limit:    MemoryLimit,
-  allowed_systems: Option<&'a HashSet<String>>,
-  drv_to_build:    HashMap<String, Uuid>,
-  name_to_build:   HashMap<String, Uuid>,
-  name_to_drv:     HashMap<String, String>,
-  dependencies:    HashMap<String, Uuid>,
-  present:         HashSet<String>,
-  touched:         HashSet<Uuid>,
-  substituters:    Vec<Substituter>,
-  aggregates:      Vec<NixJob>,
-  dropped:         usize,
+  pub(crate) priority: i32,
+  pool:                &'a PgPool,
+  eval_id:             Uuid,
+  memory_limit:        MemoryLimit,
+  allowed_systems:     Option<&'a HashSet<String>>,
+  drv_to_build:        HashMap<String, Uuid>,
+  name_to_build:       HashMap<String, Uuid>,
+  name_to_drv:         HashMap<String, String>,
+  dependencies:        HashMap<String, Uuid>,
+  present:             HashSet<String>,
+  touched:             HashSet<Uuid>,
+  substituters:        Vec<Substituter>,
+  aggregates:          Vec<NixJob>,
+  dropped:             usize,
 }
 
 impl<'a> BuildStream<'a> {
@@ -482,6 +483,7 @@ impl<'a> BuildStream<'a> {
     }
 
     Ok(Self {
+      priority: 0,
       pool,
       eval_id,
       memory_limit,
@@ -696,13 +698,21 @@ impl<'a> BuildStream<'a> {
       } else {
         self.dependencies.remove(&build.drv_path)
       };
-      let build = match adopted {
+      let mut build = match adopted {
         Some(id) => {
           adopted_ids.insert(id);
           repo::builds::adopt_dependency_in_transaction(&tx, id, &build).await?
         },
         None => repo::builds::create_in_transaction(&tx, build).await?,
       };
+      if self.priority != 0 {
+        tx.execute("UPDATE builds SET priority = $1 WHERE id = $2", &[
+          &self.priority,
+          &build.id,
+        ])
+        .await?;
+        build.priority = self.priority;
+      }
       if build.job_name.starts_with(DEPENDENCY_JOB_PREFIX) {
         self.dependencies.insert(build.drv_path.clone(), build.id);
       }

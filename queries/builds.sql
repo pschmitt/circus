@@ -98,7 +98,7 @@ eligible_pending AS (
                 AND candidate.pr_number IS NULL
                 AND candidate.pr_head_branch IS NULL
                 AND candidate.pr_base_branch IS NULL
-                AND candidate.trigger_kind IN ('source_change', 'manual', 'interval')
+                AND candidate.trigger_kind IN ('source_change', 'manual', 'interval', 'snapshot')
             )
           END
       )

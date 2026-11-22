@@ -400,6 +400,27 @@ async fn evaluate_pending_eval(
 
   log_disk_space(&config.work_dir, &jobset.name);
 
+  if claimed.trigger_kind == EvaluationTriggerKind::Snapshot {
+    let snapshot = repo::evaluations::get_snapshot(pool, claimed.id)
+      .await?
+      .ok_or_else(|| misstep::report!("Snapshot evaluation has no archive"))?;
+    let directory = tempfile::tempdir_in(&config.work_dir)?;
+    let revision = unpack_snapshot(directory.path(), &snapshot.archive).await?;
+    return run_nix_and_record_builds(
+      pool,
+      jobset,
+      &claimed,
+      directory.path(),
+      &[],
+      config,
+      notifications_config,
+      notification_secret_key,
+      nix_timeout,
+      Some((&revision, &snapshot)),
+    )
+    .await;
+  }
+
   let url = jobset.repository_url.clone();
   let work_dir = config.work_dir.clone();
   let project_name = jobset.project_name.clone();
@@ -529,6 +550,7 @@ async fn run_path_filtered_evaluation(
       notifications_config,
       notification_secret_key,
       nix_timeout,
+      None,
     )
     .await?;
     return Ok(true);
@@ -575,6 +597,88 @@ async fn record_commit_subject(
   }
 }
 
+async fn unpack_snapshot(
+  directory: &std::path::Path,
+  archive: &[u8],
+) -> misstep::Result<String> {
+  use std::path::Component;
+
+  // Extract files before symlinks. No archive entry may write through a link
+  // or modify the temporary Git metadata used by the pure flake fetcher.
+  let mut links = Vec::new();
+  for entry in tar::Archive::new(archive).entries()? {
+    let mut entry = entry?;
+    let path = entry.path()?.into_owned();
+    if path.as_os_str().is_empty() || path.components().any(|part| {
+      !matches!(part, Component::Normal(name) if !name.eq_ignore_ascii_case(".git"))
+    }) {
+      return Err(misstep::report!("Invalid snapshot archive path"));
+    }
+    let destination = directory.join(path);
+    let kind = entry.header().entry_type();
+    if kind.is_file() {
+      std::fs::create_dir_all(destination.parent().unwrap_or(directory))?;
+      entry.unpack(&destination)?;
+    } else if kind.is_symlink() {
+      let target = entry
+        .link_name()?
+        .ok_or_else(|| misstep::report!("Missing symlink target"))?;
+      links.push((destination, target.into_owned()));
+    } else {
+      return Err(misstep::report!("Unsupported snapshot archive entry"));
+    }
+  }
+  for (path, _) in &links {
+    std::fs::create_dir_all(path.parent().unwrap_or(directory))?;
+  }
+  for (path, target) in links {
+    std::os::unix::fs::symlink(target, path)?;
+  }
+  if !std::fs::symlink_metadata(directory.join("flake.lock"))
+    .is_ok_and(|metadata| metadata.is_file())
+  {
+    return Err(misstep::report!("A snapshot requires a locked flake"));
+  }
+
+  let commands: &[&[&str]] = &[
+    &["init", "--quiet", "--template="],
+    &["add", "--force", "--all"],
+    &[
+      "commit",
+      "--quiet",
+      "--no-gpg-sign",
+      "-m",
+      "Circus snapshot",
+    ],
+    &["rev-parse", "HEAD"],
+  ];
+  let mut revision = String::new();
+  for args in commands {
+    let output = tokio::process::Command::new("git")
+      .current_dir(directory)
+      .env("GIT_CONFIG_NOSYSTEM", "1")
+      .env("GIT_CONFIG_GLOBAL", "/dev/null")
+      .env("GIT_AUTHOR_NAME", "Circus")
+      .env("GIT_AUTHOR_EMAIL", "circus@localhost")
+      .env("GIT_COMMITTER_NAME", "Circus")
+      .env("GIT_COMMITTER_EMAIL", "circus@localhost")
+      .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+      .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+      .args(*args)
+      .kill_on_drop(true)
+      .output()
+      .await?;
+    if !output.status.success() {
+      return Err(misstep::report!(
+        "Snapshot staging failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+      ));
+    }
+    revision = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+  }
+  Ok(revision)
+}
+
 /// Shared back-half: invoke nix, persist builds, dispatch notifications,
 /// and mark the eval row Completed or Failed. Used by both the branch-tip
 /// path (`evaluate_jobset`) and the push-driven path
@@ -594,6 +698,7 @@ async fn run_nix_and_record_builds(
   notifications_config: &NotificationsConfig,
   notification_secret_key: Option<&str>,
   nix_timeout: Duration,
+  snapshot: Option<(&str, &repo::evaluations::EvaluationSnapshot)>,
 ) -> misstep::Result<()> {
   let max_eval_time = config.max_eval_time.map(Duration::from_secs);
   let nix_timeout = max_eval_time.map_or(nix_timeout, |limit| {
@@ -632,6 +737,7 @@ async fn run_nix_and_record_builds(
     config.s3_substituters.as_ref(),
   )
   .await?;
+  stream.priority = snapshot.map_or(0, |(_, request)| request.priority);
   let project = repo::projects::get(pool, jobset.project_id)
     .await
     .inspect_err(|error| {
@@ -682,26 +788,43 @@ async fn run_nix_and_record_builds(
   let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
   let (result, (), (), streamed) = tokio::join!(
     async {
-      let result = crate::nix::evaluate(
-        repo_path,
-        &jobset.repository_url,
-        &eval.commit_hash,
-        &jobset.nix_expression,
-        jobset.flake_mode,
-        nix_timeout,
-        config,
-        inputs,
-        &cancel,
-        &progress_tx,
-        &jobs_tx,
-        None,
-      )
-      .await;
+      let result = if let Some((revision, request)) = snapshot {
+        crate::nix::evaluate_snapshot(
+          repo_path,
+          revision,
+          request,
+          nix_timeout,
+          config,
+          &cancel,
+          &jobs_tx,
+        )
+        .await
+      } else {
+        crate::nix::evaluate(
+          repo_path,
+          &jobset.repository_url,
+          &eval.commit_hash,
+          &jobset.nix_expression,
+          jobset.flake_mode,
+          nix_timeout,
+          config,
+          inputs,
+          &cancel,
+          &progress_tx,
+          &jobs_tx,
+          None,
+        )
+        .await
+      };
       drop(jobs_tx);
       cancel.cancel();
       result
     },
-    watch_branch_history(pool, jobset, eval, config, &cancel),
+    async {
+      if snapshot.is_none() {
+        watch_branch_history(pool, jobset, eval, config, &cancel).await;
+      }
+    },
     record_progress(pool, eval.id, progress_rx, &cancel),
     stream_builds(&mut stream, jobs_rx, &cancel, notify),
   );
@@ -1627,6 +1750,67 @@ mod tests {
 
   use super::accepts_pending_evaluation;
   use crate::git::{DiscoveredRef, RefKind, retain_newest_tag};
+
+  #[tokio::test]
+  #[ignore = "requires Nix and Git"]
+  async fn snapshot_evaluates_only_the_requested_termuxpp_guest()
+  -> misstep::Result<()> {
+    let mut archive = tar::Builder::new(Vec::new());
+    let files = [
+      (
+        "flake.nix",
+        r#"{
+        outputs = { self }: {
+          termuxppConfigurations = {
+            phone.system = builtins.derivation {
+              system = "aarch64-linux";
+              name = "phone-snapshot-test";
+              builder = "/bin/sh";
+            };
+            other.system = throw "unrequested guest was evaluated";
+          };
+        };
+      }"#,
+      ),
+      (
+        "flake.lock",
+        r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
+      ),
+    ];
+    for (path, content) in files {
+      let mut header = tar::Header::new_gnu();
+      header.set_mode(0o644);
+      header.set_size(content.len() as u64);
+      archive.append_data(&mut header, path, content.as_bytes())?;
+    }
+    let request = circus_common::repo::evaluations::EvaluationSnapshot {
+      archive:  archive.into_inner()?,
+      hosts:    vec!["phone".to_owned()],
+      termuxpp: true,
+      priority: 10,
+    };
+    let checkout = tempfile::tempdir()?;
+    let rev = super::unpack_snapshot(checkout.path(), &request.archive).await?;
+    let (jobs, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let result = crate::nix::evaluate_snapshot(
+      checkout.path(),
+      &rev,
+      &request,
+      std::time::Duration::from_secs(30),
+      &circus_config::EvaluatorConfig {
+        restrict_eval: true,
+        ..Default::default()
+      },
+      &tokio_util::sync::CancellationToken::new(),
+      &jobs,
+    )
+    .await?;
+    assert_eq!(result.job_count, 1);
+    let job = received.try_recv()?;
+    assert_eq!(job.name, "termuxpp-system-phone");
+    assert_eq!(job.system.as_deref(), Some("aarch64-linux"));
+    Ok(())
+  }
 
   #[test]
   fn interval_restarts_are_accepted_by_pending_queue() {

@@ -88,6 +88,9 @@ pub struct DatabaseConfig {
 )]
 #[serde(default)]
 pub struct ServerConfig {
+  /// Repository URLs for which administrators may submit working-tree
+  /// snapshots.
+  pub snapshot_repositories:              Vec<String>,
   /// Read-only queue runner demand report used by the operator API.
   pub qemu_overflow_status:               Option<QemuOverflowStatusConfig>,
   pub host:                               String,
@@ -955,6 +958,7 @@ pub struct QemuOverflowStatusConfig {
 impl Default for ServerConfig {
   fn default() -> Self {
     Self {
+      snapshot_repositories:              Vec::new(),
       qemu_overflow_status:               None,
       host:                               "127.0.0.1".to_string(),
       port:                               3000,

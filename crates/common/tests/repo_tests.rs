@@ -129,6 +129,32 @@ async fn enable_latest_only(
   .expect("enable latest-only")
 }
 
+#[tokio::test]
+async fn snapshot_persists_request_with_evaluation() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+  let project = create_test_project(&pool, "snapshot").await;
+  let jobset = create_test_jobset(&pool, project.id).await;
+  let id = uuid::Uuid::new_v4().simple().to_string();
+  let hosts = vec!["phone".to_string()];
+  let evaluation = repo::evaluations::create_snapshot(
+    &pool, jobset.id, &id, b"archive", &hosts, true, 10,
+  )
+  .await
+  .expect("create snapshot");
+  assert_eq!(evaluation.trigger_kind, EvaluationTriggerKind::Snapshot);
+  assert_eq!(evaluation.status, EvaluationStatus::Pending);
+  let snapshot = repo::evaluations::get_snapshot(&pool, evaluation.id)
+    .await
+    .expect("load snapshot")
+    .expect("snapshot exists");
+  assert_eq!(snapshot.archive, b"archive");
+  assert_eq!(snapshot.hosts, hosts);
+  assert!(snapshot.termuxpp);
+  assert_eq!(snapshot.priority, 10);
+}
+
 /// Helper: create an evaluation for a jobset.
 async fn create_test_eval(
   pool: &circus_common::PgPool,

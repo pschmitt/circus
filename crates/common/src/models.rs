@@ -160,6 +160,7 @@ pub enum EvaluationTriggerKind {
   SourceChange,
   Manual,
   Interval,
+  Snapshot,
 }
 
 impl EvaluationTriggerKind {
@@ -168,6 +169,7 @@ impl EvaluationTriggerKind {
     match self {
       Self::SourceChange => "source_change",
       Self::Manual => "manual",
+      Self::Snapshot => "snapshot",
       Self::Interval => "interval",
     }
   }
@@ -180,6 +182,7 @@ impl std::str::FromStr for EvaluationTriggerKind {
     match s {
       "source_change" => Ok(Self::SourceChange),
       "manual" => Ok(Self::Manual),
+      "snapshot" => Ok(Self::Snapshot),
       "interval" => Ok(Self::Interval),
       _ => Err(format!("invalid evaluation trigger kind '{s}'")),
     }

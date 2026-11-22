@@ -345,6 +345,23 @@ pub(super) enum BuildCommand {
 
 #[derive(Parse)]
 pub(super) enum EvaluationCommand {
+  /// Submit the current Git working tree without creating or pushing a commit.
+  Submit {
+    #[pound(long)]
+    jobset_id:       Uuid,
+    /// Comma-separated NixOS configuration names.
+    #[pound(long)]
+    hosts:           String,
+    /// Git checkout to snapshot.
+    #[pound(long, default = ".")]
+    checkout:        PathBuf,
+    /// Build TermuxPP guest systems.
+    #[pound(long)]
+    termuxpp:        bool,
+    /// Submit at the ordinary queue priority.
+    #[pound(long)]
+    normal_priority: bool,
+  },
   /// List evaluations.
   #[pound(alias = "ls")]
   List {

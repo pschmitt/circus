@@ -381,7 +381,7 @@ async fn evaluate_flake(
 ) -> Result<EvalResult> {
   if nix_expression == "nixosConfigurations" {
     return evaluate_all_nixos_configs(
-      repo_path, source, timeout, config, inputs, cancel, jobs,
+      repo_path, source, timeout, config, cancel, jobs, None,
     )
     .await;
   }
@@ -457,19 +457,58 @@ async fn evaluate_flake(
   .await
 }
 
+pub(crate) async fn evaluate_snapshot(
+  repo_path: &Path,
+  revision: &str,
+  request: &circus_common::repo::evaluations::EvaluationSnapshot,
+  timeout: Duration,
+  config: &EvaluatorConfig,
+  cancel: &CancellationToken,
+  jobs: &JobSink,
+) -> Result<EvalResult> {
+  let source =
+    flake_ref::source_flake_ref("file:///snapshot", revision, repo_path)?;
+  evaluate_all_nixos_configs(
+    repo_path,
+    &source,
+    timeout,
+    config,
+    cancel,
+    jobs,
+    Some(request),
+  )
+  .await
+}
+
 /// Resolve all toplevels in one nix eval.
 async fn evaluate_all_nixos_configs(
   repo_path: &Path,
   source: &SourceFlakeRef,
   timeout: Duration,
   config: &EvaluatorConfig,
-  _inputs: &[JobsetInput],
   cancel: &CancellationToken,
   jobs: &JobSink,
+  snapshot: Option<&circus_common::repo::evaluations::EvaluationSnapshot>,
 ) -> Result<EvalResult> {
-  let flake_ref = format!("{}#nixosConfigurations", source.flake_ref);
+  let (output, selector) = if snapshot.is_some_and(|request| request.termuxpp) {
+    ("termuxppConfigurations", "system")
+  } else {
+    ("nixosConfigurations", "config.system.build.toplevel")
+  };
+  let flake_ref = format!("{}#{output}", source.flake_ref);
 
-  let expr = "builtins.mapAttrs (_: v: v.config.system.build.toplevel)";
+  let expr = match snapshot {
+    Some(request) => {
+      let names = serde_json::to_string(&request.hosts)?;
+      let names = serde_json::to_string(&names)?;
+      format!(
+        "configs: builtins.listToAttrs (map (name: {{ inherit name; value = \
+         (builtins.getAttr name configs).{selector}.drvPath; }}) \
+         (builtins.fromJSON {names}))"
+      )
+    },
+    None => "builtins.mapAttrs (_: v: v.config.system.build.toplevel)".into(),
+  };
   let mut cmd = Command::new("nix");
   cmd
     .args([
@@ -477,7 +516,7 @@ async fn evaluate_all_nixos_configs(
       "--json",
       &flake_ref,
       "--apply",
-      expr,
+      &expr,
       "--no-write-lock-file",
     ])
     .kill_on_drop(true);
@@ -516,6 +555,14 @@ async fn evaluate_all_nixos_configs(
     })?;
 
   let entries = flatten_attrs("", &value);
+  if let Some(request) = snapshot
+    && (entries.len() != request.hosts.len()
+      || entries.iter().any(|(_, path)| !is_store_drv_path(path)))
+  {
+    return Err(CiError::NixEval(
+      "Snapshot did not resolve every requested host to a derivation".into(),
+    ));
+  }
 
   tracing::info!(
     count = entries.len(),
@@ -528,7 +575,18 @@ async fn evaluate_all_nixos_configs(
       "{}#nixosConfigurations.{name}.config.system.build.toplevel",
       source.flake_ref
     );
-    let shown = resolve_drv(&drv_ref, config).await;
+    let shown = if snapshot.is_some() {
+      let shown = tokio::select! {
+        outcome = tokio::time::timeout_at(deadline, resolve_drv(&eval_path, config)) => outcome
+          .map_err(|_| CiError::Timeout("Resolving snapshot derivations timed out".into()))?,
+        () = cancel.cancelled() => return Err(CiError::NixEval("Nix evaluation was cancelled".into())),
+      };
+      Some(shown.ok_or_else(|| {
+        CiError::NixEval(format!("Could not read derivation for {name}"))
+      })?)
+    } else {
+      resolve_drv(&drv_ref, config).await
+    };
 
     let (drv_path, system, outputs, input_drvs) = if let Some(shown) = shown {
       (
@@ -549,7 +607,13 @@ async fn evaluate_all_nixos_configs(
 
     jobs
       .send(NixJob {
-        name,
+        name: if snapshot.is_some_and(|request| request.termuxpp) {
+          format!("termuxpp-system-{name}")
+        } else if snapshot.is_some() {
+          format!("hosts.{name}")
+        } else {
+          name
+        },
         drv_path,
         system,
         outputs,

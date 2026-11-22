@@ -220,6 +220,9 @@ pub async fn auto_promote_if_complete(
   jobset_id: Uuid,
   evaluation_id: Uuid,
 ) -> Result<()> {
+  if super::evaluations::is_snapshot(pool, evaluation_id).await? {
+    return Ok(());
+  }
   let channels = {
     let client = pool.get().await?;
     // Check if all builds for this evaluation are completed

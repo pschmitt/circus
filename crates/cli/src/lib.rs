@@ -12,5 +12,6 @@ mod app;
 mod client;
 mod commands;
 mod output;
+mod snapshot;
 
 pub use app::{run, run_from};

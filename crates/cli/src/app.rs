@@ -548,6 +548,29 @@ impl CommandRunner {
 
   async fn evaluations(&self, command: EvaluationCommand) -> Result<()> {
     match command {
+      EvaluationCommand::Submit {
+        jobset_id,
+        hosts,
+        checkout,
+        termuxpp,
+        normal_priority,
+      } => {
+        let archive = tokio::task::spawn_blocking(move || {
+          crate::snapshot::archive_checkout(&checkout)
+        })
+        .await??;
+        let path = with_query("api/v1/evaluations/snapshot", &[
+          ("jobset_id", jobset_id.to_string()),
+          ("hosts", hosts),
+          ("termuxpp", termuxpp.to_string()),
+          ("normal_priority", normal_priority.to_string()),
+        ]);
+        let response = self.api.post_archive(&path, archive).await?;
+        if self.json_output {
+          return print_json(&response);
+        }
+        println!("Submitted snapshot evaluation {}", field(&response, "id"));
+      },
       EvaluationCommand::List {
         jobset_id,
         status,

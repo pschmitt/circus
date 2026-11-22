@@ -64,11 +64,47 @@ impl ApiClient {
     self.send(Method::DELETE, path, None, auth_required).await
   }
 
+  pub(super) async fn post_archive(
+    &self,
+    path: &str,
+    archive: Vec<u8>,
+  ) -> Result<Value> {
+    self
+      .send_body(
+        Method::POST,
+        path,
+        Some(archive.into()),
+        "application/x-tar",
+        true,
+      )
+      .await
+  }
+
   async fn send(
     &self,
     method: Method,
     path: &str,
     body: Option<Value>,
+    auth_required: bool,
+  ) -> Result<Value> {
+    let body = body.map(|value| serde_json::to_vec(&value)).transpose()?;
+    self
+      .send_body(
+        method,
+        path,
+        body.map(Into::into),
+        "application/json",
+        auth_required,
+      )
+      .await
+  }
+
+  async fn send_body(
+    &self,
+    method: Method,
+    path: &str,
+    body: Option<reqwest::Body>,
+    content_type: &str,
     auth_required: bool,
   ) -> Result<Value> {
     if auth_required && self.api_key.is_none() {
@@ -84,7 +120,9 @@ impl ApiClient {
       request = request.bearer_auth(api_key);
     }
     if let Some(body) = body {
-      request = request.json(&body);
+      request = request
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(body);
     }
 
     let response = request.send_redacted().await?;

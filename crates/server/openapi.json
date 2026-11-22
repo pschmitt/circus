@@ -1227,6 +1227,54 @@
         }
       }
     },
+    "/evaluations/snapshot": {
+      "post": {
+        "summary": "Submit selected host configurations from a working-tree snapshot",
+        "parameters": [
+          {
+            "name": "jobset_id",
+            "in": "query",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/Uuid" }
+          },
+          {
+            "name": "hosts",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated configuration names",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "termuxpp",
+            "in": "query",
+            "schema": { "type": "boolean", "default": false }
+          },
+          {
+            "name": "normal_priority",
+            "in": "query",
+            "schema": { "type": "boolean", "default": false }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-tar": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Queued snapshot evaluation",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Evaluation" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/evaluations/trigger": {
       "post": {
         "summary": "Trigger an evaluation",
@@ -2627,7 +2675,8 @@
             "enum": [
               "source_change",
               "manual",
-              "interval"
+              "interval",
+              "snapshot"
             ]
           }
         }

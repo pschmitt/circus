@@ -102,6 +102,7 @@ pub(crate) fn is_trusted_ref_evaluation(
   matches!(
     evaluation.trigger_kind,
     EvaluationTriggerKind::SourceChange
+      | EvaluationTriggerKind::Snapshot
       | EvaluationTriggerKind::Manual
       | EvaluationTriggerKind::Interval
   )

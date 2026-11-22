@@ -969,3 +969,30 @@ builders' stores may require rebuilding outputs.
 If using distributed agents:
 
 - Use TLS/mTLS and rotate RPC bearer tokens as part of normal secret rotation.
+
+### Working-tree snapshots
+
+An administrator can submit selected NixOS host configurations from a local
+checkout using a server-enabled trusted jobset. Use `--termuxpp` for TermuxPP
+guest systems.
+
+```bash
+circusctl evaluations submit --jobset-id <jobset-id> \
+  --checkout /path/to/checkout --termuxpp --hosts phone-a,phone-b
+```
+
+Enable this for specific repository URLs with
+`server.snapshot_repositories`. Configure `server.max_body_size` to at
+least 16777216 to accept the full 16 MiB snapshot limit. The API uses
+`POST /api/v1/evaluations/snapshot?jobset_id=…&hosts=…` with a tar body. It
+requires an admin API key and an enabled branch-based flake jobset.
+
+The client includes the current contents of tracked and non-ignored untracked
+files. The snapshot and its lock file are retained with the evaluation so it
+can be restarted. The evaluator creates an internal Git revision for pure
+flake evaluation. The caller's checkout and remote stay untouched.
+
+Snapshot jobs and their queued prerequisites start at priority 10. Use
+`--normal-priority` for the ordinary queue priority. Snapshot builds use
+the configured jobset's eligible builders. Commit notifications, automatic
+channel promotion, and repository-driven jobset sync are skipped.

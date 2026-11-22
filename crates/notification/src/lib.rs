@@ -249,6 +249,21 @@ async fn dispatch(
   encryption_key: Option<&str>,
   commit_status_only: bool,
 ) {
+  if let Some(pool) = pool {
+    match circus_common::repo::evaluations::is_snapshot(
+      pool,
+      build.evaluation_id,
+    )
+    .await
+    {
+      Ok(false) => {},
+      Ok(true) => return,
+      Err(error) => {
+        warn!(%error, "Unable to determine evaluation source for notification");
+        return;
+      },
+    }
+  }
   let event = BuildEvent::from_build(build, project, commit_hash);
 
   // Intermediate dependency builds are internal scheduling artifacts; their
@@ -435,6 +450,15 @@ pub async fn dispatch_evaluation_update(
   config: &NotificationsConfig,
   encryption_key: Option<&str>,
 ) {
+  match circus_common::repo::evaluations::is_snapshot(pool, evaluation_id).await
+  {
+    Ok(false) => {},
+    Ok(true) => return,
+    Err(error) => {
+      warn!(%error, "Unable to determine evaluation source for notification");
+      return;
+    },
+  }
   let (event, project) = match evaluation_event(pool, evaluation_id).await {
     Ok(Some(found)) => found,
     Ok(None) => return,

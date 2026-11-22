@@ -172,6 +172,100 @@ pub async fn create_interval(
   .await
 }
 
+/// Persist a snapshot and its pending evaluation atomically.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL rejects the snapshot or the evaluation.
+pub async fn create_snapshot(
+  pool: &PgPool,
+  jobset_id: Uuid,
+  snapshot_id: &str,
+  archive: &[u8],
+  hosts: &[String],
+  termuxpp: bool,
+  priority: i32,
+) -> Result<Evaluation> {
+  let mut client = pool.get().await?;
+  let tx = client.transaction().await?;
+  let row = q::create_with_kind()
+    .bind(
+      &tx,
+      &jobset_id,
+      &snapshot_id,
+      &"pending",
+      &"snapshot",
+      &None::<i32>,
+      &None::<&str>,
+      &None::<&str>,
+      &None::<&str>,
+      &None::<&str>,
+      &None::<&str>,
+    )
+    .one()
+    .await?;
+  tx.execute(
+    "INSERT INTO evaluation_snapshots (evaluation_id, archive, hosts, \
+     termuxpp, priority)
+     VALUES ($1, $2, $3, $4, $5)",
+    &[&row.id, &archive, &hosts, &termuxpp, &priority],
+  )
+  .await?;
+  tx.commit().await?;
+  row.try_into()
+}
+
+/// Check whether an evaluation was submitted as a working-tree snapshot.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
+pub async fn is_snapshot(pool: &PgPool, evaluation_id: Uuid) -> Result<bool> {
+  let client = pool.get().await?;
+  let row = client
+    .query_one(
+      "SELECT EXISTS (SELECT 1 FROM evaluation_snapshots WHERE evaluation_id \
+       = $1)",
+      &[&evaluation_id],
+    )
+    .await?;
+  Ok(row.get(0))
+}
+
+pub struct EvaluationSnapshot {
+  pub archive:  Vec<u8>,
+  pub hosts:    Vec<String>,
+  pub termuxpp: bool,
+  pub priority: i32,
+}
+
+/// Load the immutable snapshot associated with an evaluation.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
+pub async fn get_snapshot(
+  pool: &PgPool,
+  evaluation_id: Uuid,
+) -> Result<Option<EvaluationSnapshot>> {
+  let client = pool.get().await?;
+  let row = client
+    .query_opt(
+      "SELECT archive, hosts, termuxpp, priority FROM evaluation_snapshots \
+       WHERE evaluation_id = $1",
+      &[&evaluation_id],
+    )
+    .await?;
+  Ok(row.map(|row| {
+    EvaluationSnapshot {
+      archive:  row.get(0),
+      hosts:    row.get(1),
+      termuxpp: row.get(2),
+      priority: row.get(3),
+    }
+  }))
+}
+
 async fn create_with_kind(
   pool: &PgPool,
   input: CreateEvaluation,

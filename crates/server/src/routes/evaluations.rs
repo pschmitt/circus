@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use axum::{
   Json,
   Router,
-  extract::{Path, Query, State},
+  body::Bytes,
+  extract::{DefaultBodyLimit, Path, Query, State},
   http::Extensions,
   routing::{get, post},
 };
@@ -103,6 +104,82 @@ async fn trigger_evaluation(
 
   let evaluation = repo::evaluations::create_manual(&state.pool, input).await?;
   Ok(Json(evaluation))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitSnapshotParams {
+  jobset_id:       Uuid,
+  hosts:           String,
+  #[serde(default)]
+  normal_priority: bool,
+  #[serde(default)]
+  termuxpp:        bool,
+}
+
+const SNAPSHOT_LIMIT: usize = 16 * 1024 * 1024;
+
+async fn submit_snapshot(
+  extensions: Extensions,
+  State(state): State<AppState>,
+  Query(params): Query<SubmitSnapshotParams>,
+  archive: Bytes,
+) -> Result<Json<Evaluation>, ApiError> {
+  use circus_common::CiError;
+
+  permissions::require_api(&extensions, Permission::Admin)?;
+  let jobset = repo::jobsets::get(&state.pool, params.jobset_id).await?;
+  let project = repo::projects::get(&state.pool, jobset.project_id).await?;
+  if !jobset.enabled
+    || !jobset.flake_mode
+    || jobset.branch.as_deref().is_none_or(str::is_empty)
+    || jobset.trigger_mode != JobsetTriggerMode::SourceChange
+    || !state
+      .config
+      .server
+      .snapshot_repositories
+      .contains(&project.repository_url)
+  {
+    return Err(ApiError(CiError::Forbidden(
+      "Snapshot submissions are disabled for this jobset".into(),
+    )));
+  }
+  let mut hosts: Vec<_> = params.hosts.split(',').map(str::to_owned).collect();
+  hosts.sort_unstable();
+  hosts.dedup();
+  if hosts.len() > 16
+    || hosts.iter().any(|host| {
+      host.is_empty()
+        || host.len() > 63
+        || !host.bytes().all(|byte| {
+          byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+        })
+    })
+  {
+    return Err(ApiError(CiError::Validation(
+      "Invalid snapshot hosts".into(),
+    )));
+  }
+  if archive.is_empty() || archive.len() > SNAPSHOT_LIMIT {
+    return Err(ApiError(CiError::Validation(
+      "Invalid snapshot archive size".into(),
+    )));
+  }
+
+  // Each submission has its own lifecycle, even for identical archives.
+  let snapshot_id = Uuid::new_v4().simple().to_string();
+  let priority = if params.normal_priority { 0 } else { 10 };
+  Ok(Json(
+    repo::evaluations::create_snapshot(
+      &state.pool,
+      jobset.id,
+      &snapshot_id,
+      &archive,
+      &hosts,
+      params.termuxpp,
+      priority,
+    )
+    .await?,
+  ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,4 +302,8 @@ pub fn router() -> Router<AppState> {
     .route("/evaluations/{id}", get(get_evaluation))
     .route("/evaluations/{id}/compare", get(compare_evaluations))
     .route("/evaluations/trigger", post(trigger_evaluation))
+    .route(
+      "/evaluations/snapshot",
+      post(submit_snapshot).layer(DefaultBodyLimit::max(SNAPSHOT_LIMIT)),
+    )
 }

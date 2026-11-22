@@ -18,6 +18,8 @@ pound.workspace         = true
 serde.workspace         = true
 serde_json.workspace    = true
 sha2.workspace          = true
+tar.workspace           = true
+tempfile.workspace      = true
 tokio.workspace         = true
 tokio-util.workspace    = true
 toml.workspace          = true
@@ -36,7 +38,6 @@ circus-s3.workspace           = true
 
 [dev-dependencies]
 circus-migrations.workspace = true
-tempfile.workspace          = true
 
 [lints]
 workspace = true
