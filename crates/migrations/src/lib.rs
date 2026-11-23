@@ -80,6 +80,7 @@ const MIGRATIONS: &[Migration] = migrations![
   (58, "0058_evaluation_snapshots"),
   (59, "0059_snapshot_scheduling"),
   (60, "0060_snapshot_worker_fallback"),
+  (61, "0061_flake_job_snapshots"),
 ];
 
 /// Runs all migrations, creating the database first if it doesn't exist.
