@@ -794,16 +794,34 @@ async fn run_nix_and_record_builds(
   let (result, (), (), streamed) = tokio::join!(
     async {
       let result = if let Some((revision, request)) = snapshot {
-        crate::nix::evaluate_snapshot(
-          repo_path,
-          revision,
-          request,
-          nix_timeout,
-          config,
-          &cancel,
-          &jobs_tx,
-        )
-        .await
+        if request.hosts.is_empty() {
+          crate::nix::evaluate(
+            repo_path,
+            "file:///snapshot",
+            revision,
+            "circusJobs",
+            true,
+            nix_timeout,
+            config,
+            &[],
+            &cancel,
+            &progress_tx,
+            &jobs_tx,
+            None,
+          )
+          .await
+        } else {
+          crate::nix::evaluate_snapshot(
+            repo_path,
+            revision,
+            request,
+            nix_timeout,
+            config,
+            &cancel,
+            &jobs_tx,
+          )
+          .await
+        }
       } else {
         crate::nix::evaluate(
           repo_path,

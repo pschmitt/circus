@@ -18,6 +18,7 @@ use circus_common::{
   repo,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -109,7 +110,9 @@ async fn trigger_evaluation(
 #[derive(Debug, Deserialize)]
 struct SubmitSnapshotParams {
   jobset_id:       Uuid,
-  hosts:           String,
+  hosts:           Option<String>,
+  #[serde(default)]
+  flake_jobs:      bool,
   #[serde(default)]
   normal_priority: bool,
   #[serde(default)]
@@ -149,17 +152,27 @@ async fn submit_snapshot(
       "Snapshot submissions are disabled for this jobset".into(),
     )));
   }
-  let mut hosts: Vec<_> = params.hosts.split(',').map(str::to_owned).collect();
+  let mut hosts: Vec<_> =
+    params.hosts.as_deref().map_or_else(Vec::new, |hosts| {
+      hosts.split(',').map(str::to_owned).collect()
+    });
   hosts.sort_unstable();
   hosts.dedup();
-  if hosts.len() > 16
-    || hosts.iter().any(|host| {
-      host.is_empty()
-        || host.len() > 63
-        || !host.bytes().all(|byte| {
-          byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-        })
-    })
+  if params.flake_jobs && (params.hosts.is_some() || params.termuxpp) {
+    return Err(ApiError(CiError::Validation(
+      "Flake job snapshots cannot select NixOS or TermuxPP hosts".into(),
+    )));
+  }
+  if !params.flake_jobs
+    && (hosts.is_empty()
+      || hosts.len() > 16
+      || hosts.iter().any(|host| {
+        host.is_empty()
+          || host.len() > 63
+          || !host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+          })
+      }))
   {
     return Err(ApiError(CiError::Validation(
       "Invalid snapshot hosts".into(),
@@ -215,22 +228,54 @@ async fn submit_snapshot(
     front:    params.front,
     fallback: params.fallback,
   };
-  // Each submission has its own lifecycle, even for identical archives.
-  let snapshot_id = Uuid::new_v4().simple().to_string();
   let priority = if params.normal_priority { 0 } else { 10 };
-  Ok(Json(
-    repo::evaluations::create_snapshot(
-      &state.pool,
-      jobset.id,
-      &snapshot_id,
-      &archive,
-      &hosts,
-      params.termuxpp,
-      priority,
-      &scheduling,
-    )
-    .await?,
-  ))
+  // Preserve the adhoc host snapshot lifecycle. Generated flake jobs are
+  // immutable and can be submitted again after a client loses the response.
+  let snapshot_id = if params.flake_jobs {
+    let mut hash = Sha256::new();
+    hash.update(b"circus-flake-jobs-v1\0");
+    hash.update([
+      u8::from(scheduling.front),
+      u8::from(scheduling.fallback),
+      u8::from(params.normal_priority),
+    ]);
+    hash.update(scheduling.agent.unwrap_or_default().as_bytes());
+    let pool = scheduling.pool.as_deref().unwrap_or("").as_bytes();
+    hash.update(pool.len().to_be_bytes());
+    hash.update(pool);
+    hash.update(&archive);
+    Uuid::from_slice(&hash.finalize()[..16])
+      .expect("SHA-256 supplies 16 bytes")
+      .simple()
+      .to_string()
+  } else {
+    Uuid::new_v4().simple().to_string()
+  };
+
+  let result = repo::evaluations::create_snapshot(
+    &state.pool,
+    jobset.id,
+    &snapshot_id,
+    &archive,
+    &hosts,
+    params.termuxpp,
+    priority,
+    &scheduling,
+  )
+  .await;
+  match result {
+    Ok(evaluation) => Ok(Json(evaluation)),
+    Err(error) if params.flake_jobs => {
+      let existing = repo::evaluations::get_by_jobset_and_commit(
+        &state.pool,
+        jobset.id,
+        &snapshot_id,
+      )
+      .await?;
+      existing.map(Json).ok_or(ApiError(error))
+    },
+    Err(error) => Err(ApiError(error)),
+  }
 }
 
 #[derive(Debug, Deserialize)]
