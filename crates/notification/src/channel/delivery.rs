@@ -44,11 +44,24 @@ const PR_COMMENT_AUTHOR: &str = "circus-pschmitt[bot]";
 #[derive(serde::Deserialize)]
 struct PullRequestHead {
   head: PullRequestRef,
+  base: PullRequestRef,
+  user: PullRequestAuthor,
+}
+
+#[derive(serde::Deserialize)]
+struct PullRequestAuthor {
+  id: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct PullRequestRepository {
+  id: u64,
 }
 
 #[derive(serde::Deserialize)]
 struct PullRequestRef {
-  sha: String,
+  sha:  String,
+  repo: Option<PullRequestRepository>,
 }
 
 #[derive(serde::Deserialize)]
@@ -124,12 +137,19 @@ pub async fn upsert_github_pr_comment(
   }
   let rows = transaction
     .query(
-      "SELECT status, COUNT(*) AS count FROM builds WHERE evaluation_id = $1 \
-       AND job_name NOT LIKE 'drv:%' GROUP BY status",
+      "SELECT b.status, COUNT(*) AS count, COUNT(*) FILTER (WHERE b.system = \
+       'aarch64-linux') AS arm_count FROM builds b JOIN evaluations e ON e.id \
+       = b.evaluation_id JOIN jobsets j ON j.id = e.jobset_id JOIN \
+       evaluations selected ON selected.id = $1 JOIN jobsets source ON \
+       source.id = selected.jobset_id WHERE j.project_id = source.project_id \
+       AND e.pr_number = selected.pr_number AND e.commit_hash = \
+       selected.commit_hash AND e.superseded_by IS NULL AND b.job_name NOT \
+       LIKE 'drv:%' GROUP BY b.status",
       &[&event.evaluation_id],
     )
     .await
     .map_err(|error| format!("Cannot refresh PR build counts: {error}"))?;
+  let mut pending_arm = 0;
   let counts = rows
     .into_iter()
     .map(|row| {
@@ -137,12 +157,42 @@ pub async fn upsert_github_pr_comment(
       let status = status.parse::<BuildStatus>().map_err(|error| {
         format!("Cannot parse build status {status:?}: {error}")
       })?;
+      if status == BuildStatus::Pending {
+        pending_arm = row.get("arm_count");
+      }
       let count: i64 = row.get("count");
       Ok((status, count))
     })
     .collect::<Result<Vec<_>, String>>()?;
   let mut latest_event = event.clone();
   latest_event.jobs = crate::JobSummary::from_counts_including_pending(&counts);
+  let failed_jobs = transaction
+    .query(
+      "SELECT b.id, b.job_name FROM builds b JOIN evaluations e ON e.id = \
+       b.evaluation_id JOIN jobsets j ON j.id = e.jobset_id JOIN evaluations \
+       selected ON selected.id = $1 JOIN jobsets source ON source.id = \
+       selected.jobset_id WHERE j.project_id = source.project_id AND \
+       e.pr_number = selected.pr_number AND e.commit_hash = \
+       selected.commit_hash AND e.superseded_by IS NULL AND b.status IN \
+       ('failed', 'failed_with_output', 'dependency_failed', \
+       'cached_failure', 'timeout', 'oom_killed', 'unsupported_system', \
+       'log_limit_exceeded', 'nar_size_limit_exceeded', 'non_deterministic') \
+       ORDER BY (b.job_name LIKE 'drv:%'), b.job_name, b.id LIMIT 6",
+      &[&event.evaluation_id],
+    )
+    .await
+    .map_err(|error| format!("Cannot list failed PR jobs: {error}"))?;
+  let diagnostics = CommentDiagnostics {
+    evaluation: error
+      .as_deref()
+      .and_then(|error| evaluation_error_summary(error, &expression)),
+    builds: build_failure_summary(&counts),
+    failed_jobs: failed_jobs
+      .into_iter()
+      .map(|row| (row.get("id"), row.get("job_name")))
+      .collect(),
+    pending_arm,
+  };
 
   let update = tokio::time::timeout(
     Duration::from_secs(40),
@@ -153,9 +203,7 @@ pub async fn upsert_github_pr_comment(
       &repo,
       number,
       &latest_event,
-      error
-        .as_deref()
-        .and_then(|error| evaluation_error_summary(error, &expression)),
+      diagnostics,
     ),
   )
   .await
@@ -178,7 +226,7 @@ async fn upsert_github_pr_comment_locked(
   repo: &str,
   number: i32,
   event: &EvaluationEvent,
-  error_summary: Option<String>,
+  diagnostics: CommentDiagnostics,
 ) -> Result<(), String> {
   let base_url = Url::parse(circus_base_url)
     .map_err(|error| format!("Invalid Circus base URL: {error}"))?;
@@ -263,7 +311,61 @@ async fn upsert_github_pr_comment_locked(
     );
     return Ok(());
   }
-  let body = render_pr_comment(event, &detail_url, error_summary.as_deref());
+  let mut notes: Vec<_> = diagnostics.evaluation.into_iter().collect();
+  if let Some(builds) = diagnostics.builds {
+    notes.push(builds);
+  }
+  if !diagnostics.failed_jobs.is_empty() {
+    let base = circus_base_url.trim_end_matches('/');
+    let links: Vec<_> = diagnostics
+      .failed_jobs
+      .iter()
+      .map(|(id, name)| {
+        let label = if name.len() <= 96
+          && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-:".contains(&c))
+        {
+          name.as_str()
+        } else {
+          "Build log"
+        };
+        format!("[{label}]({base}/build/{id})")
+      })
+      .collect();
+    notes.push(format!("**Build details** · {}", links.join(" · ")));
+  }
+  if diagnostics.pending_arm > 0 {
+    let reason = if pull
+      .head
+      .repo
+      .as_ref()
+      .zip(pull.base.repo.as_ref())
+      .is_none_or(|(head, base)| head.id != base.id)
+    {
+      Some("The trusted GitHub ARM pool requires a branch in this repository.")
+    } else if let Some(file) =
+      std::env::var_os("CIRCUS_PR_COMMENT_AUTHOR_IDS_FILE")
+    {
+      let ids = tokio::fs::read(file)
+        .await
+        .ok()
+        .and_then(|data| serde_json::from_slice::<Vec<u64>>(&data).ok());
+      ids
+        .filter(|ids| !ids.contains(&pull.user.id))
+        .map(|_| "The PR author is outside the GitHub ARM runner allowlist.")
+    } else {
+      None
+    };
+    if let Some(reason) = reason {
+      notes.push(format!(
+        "**ARM jobs waiting for runner eligibility ({})** · {reason}",
+        diagnostics.pending_arm
+      ));
+    }
+  }
+  let diagnostic = (!notes.is_empty()).then(|| notes.join("\n\n"));
+  let body = render_pr_comment(event, &detail_url, diagnostic.as_deref());
   let target = owned_ids.first().copied();
   let request = target.map_or_else(
     || http.post(format!("{api}/issues/{number}/comments")),
@@ -347,6 +449,37 @@ fn evaluation_error_summary(error: &str, expression: &str) -> Option<String> {
   }
 }
 
+struct CommentDiagnostics {
+  evaluation:  Option<String>,
+  builds:      Option<String>,
+  failed_jobs: Vec<(uuid::Uuid, String)>,
+  pending_arm: i64,
+}
+
+fn build_failure_summary(counts: &[(BuildStatus, i64)]) -> Option<String> {
+  let mut failures: Vec<_> = counts
+    .iter()
+    .filter_map(|(status, count)| {
+      let reason = match status {
+        BuildStatus::Failed | BuildStatus::FailedWithOutput => "build failed",
+        BuildStatus::DependencyFailed => "prerequisite failed",
+        BuildStatus::CachedFailure => "previous failure reused",
+        BuildStatus::Timeout => "build timed out",
+        BuildStatus::UnsupportedSystem => "no compatible builder",
+        BuildStatus::OomKilled => "builder ran out of memory",
+        BuildStatus::LogLimitExceeded => "log limit exceeded",
+        BuildStatus::NarSizeLimitExceeded => "output size limit exceeded",
+        BuildStatus::NonDeterministic => "output was non-deterministic",
+        _ => return None,
+      };
+      Some(format!("{count} × {reason}"))
+    })
+    .collect();
+  failures.sort();
+  (!failures.is_empty())
+    .then(|| format!("**Job diagnostics** · {}", failures.join(" · ")))
+}
+
 fn render_pr_comment(
   event: &EvaluationEvent,
   detail_url: &str,
@@ -362,6 +495,7 @@ fn render_pr_comment(
       match event.jobs.status() {
         "success" => ("✅", "All builds passed"),
         "failure" => ("❌", "Some builds failed"),
+        "pending" if event.jobs.running == 0 => ("⏳", "Builds are queued"),
         "pending" => ("⏳", "Builds are still running"),
         "cancelled" => ("⚪", "Builds were cancelled"),
         _ => ("⚠️", "Builds finished with skipped jobs"),
@@ -388,11 +522,8 @@ fn render_pr_comment(
       event.jobs.skipped,
     )
   };
-  let diagnostic = if event.evaluation_status == EvaluationStatus::Failed {
-    error_summary.map_or_else(String::new, |summary| format!("{summary}\n\n"))
-  } else {
-    String::new()
-  };
+  let diagnostic =
+    error_summary.map_or_else(String::new, |summary| format!("{summary}\n\n"));
   let commit = &event.commit_hash[..event.commit_hash.len().min(12)];
   format!(
     "{PR_COMMENT_MARKER}\n### {icon} Circus: \
@@ -879,6 +1010,28 @@ mod pr_comment_tests {
     }];
     let existing_id = owned_pr_comment_ids(&comments).first().copied();
     assert_eq!(existing_id, Some(27));
+  }
+
+  #[test]
+  fn queued_jobs_are_distinct_from_running_and_failures_are_explained() {
+    let counts = [
+      (BuildStatus::Pending, 4),
+      (BuildStatus::DependencyFailed, 2),
+      (BuildStatus::Timeout, 1),
+    ];
+    let event = event(JobSummary::from_counts_including_pending(&[(
+      BuildStatus::Pending,
+      4,
+    )]));
+    let diagnostics = build_failure_summary(&counts).unwrap();
+    let body = render_pr_comment(
+      &event,
+      "https://circus.example/evaluation/abc",
+      Some(&diagnostics),
+    );
+    assert!(body.contains("Builds are queued"));
+    assert!(body.contains("2 × prerequisite failed"));
+    assert!(body.contains("1 × build timed out"));
   }
 
   #[test]
