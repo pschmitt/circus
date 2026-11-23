@@ -324,6 +324,19 @@
           '';
       });
 
+    circus.consumerBuilds.nixos-config = {
+      repository = "pschmitt/nixos-config";
+      ref = "main";
+      input = "circus";
+      follows = [
+        "nixpkgs"
+      ];
+      packages.aarch64-linux = [
+        "circus-agent"
+        "circus-cli"
+      ];
+    };
+
     hydraJobs = lib.genAttrs ["x86_64-linux" "aarch64-linux"] (system:
       {
         packages = {
