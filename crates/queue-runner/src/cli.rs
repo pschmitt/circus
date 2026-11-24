@@ -305,6 +305,8 @@ where
   listener_handle.abort();
   let _ = listener_handle.await;
 
+  circus_notification::flush_evaluation_updates(Duration::from_secs(15)).await;
+
   tracing::info!("Queue runner shutting down, closing database pool");
   db.close();
 

@@ -7,6 +7,7 @@
 //! identical regardless of `enable_retry_queue`.
 
 mod channel;
+mod coalesce;
 mod event;
 
 use std::{
@@ -432,13 +433,50 @@ pub async fn dispatch_build_finished(
   if let Some(pool) = pool
     && !BuildEvent::from_build(build, project, commit_hash).is_dependency()
   {
-    dispatch_evaluation_update(
-      pool,
+    queue_evaluation_update(
+      pool.clone(),
       build.evaluation_id,
-      config,
-      encryption_key,
-    )
-    .await;
+      config.clone(),
+      encryption_key.map(ToOwned::to_owned),
+    );
+  }
+}
+
+/// How long finished builds of one evaluation are collected into one update.
+const EVALUATION_UPDATE_DELAY: Duration = Duration::from_secs(3);
+
+static EVALUATION_UPDATES: LazyLock<coalesce::Coalescer> =
+  LazyLock::new(coalesce::Coalescer::default);
+
+/// Run [`dispatch_evaluation_update`] in the background, once for all builds of
+/// an evaluation that finish within [`EVALUATION_UPDATE_DELAY`]. It makes
+/// several GitHub requests, so awaiting it per build would hold up scheduling.
+fn queue_evaluation_update(
+  pool: PgPool,
+  evaluation_id: uuid::Uuid,
+  config: NotificationsConfig,
+  encryption_key: Option<String>,
+) {
+  EVALUATION_UPDATES.schedule(
+    evaluation_id,
+    EVALUATION_UPDATE_DELAY,
+    async move {
+      dispatch_evaluation_update(
+        &pool,
+        evaluation_id,
+        &config,
+        encryption_key.as_deref(),
+      )
+      .await;
+    },
+  );
+}
+
+/// Wait for queued evaluation updates, at most `timeout`. Call on shutdown, or
+/// the last update of an evaluation may be lost.
+pub async fn flush_evaluation_updates(timeout: Duration) {
+  if !EVALUATION_UPDATES.wait_idle(timeout).await {
+    warn!("Shutting down with evaluation updates still pending");
   }
 }
 

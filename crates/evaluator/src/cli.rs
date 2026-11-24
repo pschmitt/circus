@@ -117,6 +117,8 @@ async fn run_async(config: Config) -> misstep::Result<()> {
   listener_handle.abort();
   let _ = listener_handle.await;
 
+  circus_notification::flush_evaluation_updates(Duration::from_secs(15)).await;
+
   tracing::info!("Evaluator shutting down, closing database pool");
   db.close();
 
