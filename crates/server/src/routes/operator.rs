@@ -1,4 +1,11 @@
-use axum::{Json, Router, extract::State, http::Extensions, routing::get};
+use axum::{
+  Json,
+  Router,
+  extract::{Query, State},
+  http::Extensions,
+  routing::get,
+};
+use serde::Deserialize;
 
 use crate::{error::ApiError, operator, permissions, state::AppState};
 
@@ -40,10 +47,24 @@ async fn projects(
   ))
 }
 
+#[derive(Debug, Deserialize)]
+struct QueueParams {
+  /// Comma-separated features of the asking pool.
+  features: Option<String>,
+}
+
 async fn queue(
   State(state): State<AppState>,
+  Query(params): Query<QueueParams>,
 ) -> Result<Json<Vec<operator::OperatorQueueSystem>>, ApiError> {
-  Ok(Json(operator::queue(&state).await?))
+  let features = params.features.map(|features| {
+    features
+      .split(',')
+      .filter(|feature| !feature.is_empty())
+      .map(str::to_owned)
+      .collect::<Vec<_>>()
+  });
+  Ok(Json(operator::queue(&state, features.as_deref()).await?))
 }
 
 async fn workers(

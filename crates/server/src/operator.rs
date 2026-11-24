@@ -503,14 +503,29 @@ pub async fn projects_with_latest_status(
 /// # Errors
 ///
 /// Returns an error when the pending-build query fails.
-pub async fn queue(state: &AppState) -> Result<Vec<OperatorQueueSystem>> {
-  let pending = circus_common::repo::builds::list_pending_in_scheduler_order(
-    &state.pool,
-    100,
-    0,
-  )
-  .await
-  .map_err(ApiError)?;
+///
+/// With `features`, count only builds whose required features are all in the
+/// list, so a worker pool does not scale on builds it can never run.
+pub async fn queue(
+  state: &AppState,
+  features: Option<&[String]>,
+) -> Result<Vec<OperatorQueueSystem>> {
+  let mut pending =
+    circus_common::repo::builds::list_pending_in_scheduler_order(
+      &state.pool,
+      10_000,
+      0,
+    )
+    .await
+    .map_err(ApiError)?;
+  if let Some(features) = features {
+    pending.retain(|build| {
+      build
+        .scheduling_features()
+        .iter()
+        .all(|feature| features.contains(feature))
+    });
+  }
   let qemu_overflow_count = current_qemu_overflow_count(state).await;
   let mut queue =
     OperatorQueueSystem::from_pending(&pending, qemu_overflow_count);

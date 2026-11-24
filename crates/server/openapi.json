@@ -1671,6 +1671,14 @@
     "/operator/queue": {
       "get": {
         "summary": "Queued builds grouped by system",
+        "parameters": [
+          {
+            "name": "features",
+            "in": "query",
+            "description": "Comma-separated worker features: count only builds that need no others",
+            "schema": { "type": "string" }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Array of system queue counts"

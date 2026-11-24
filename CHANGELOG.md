@@ -42,6 +42,10 @@ correct existing behaviour, "Changed" for updates to existing behaviour, and
 
 ### Fixed
 
+- A GitHub Actions launch reservation ends when its agent registers. Finished
+  runners used to block new ones until `inflight_ttl_secs`.
+- `GET /api/v1/operator/queue` no longer counts only the first 100 pending
+  builds, and `features` limits it to builds a worker pool can run.
 - Evaluation workers are now recycled at three quarters of
   `evaluator.memory_limit_mb`. They used to abort at the hard limit first and
   lose the job they were evaluating.

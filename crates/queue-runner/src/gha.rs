@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap, VecDeque},
+  collections::{HashMap, HashSet, VecDeque},
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -10,6 +10,7 @@ use circus_http::RequestExt as _;
 use misstep::{ResultExt as _, bail};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
   dispatch::{github_repository_slug, supports_required_features, trusted_build_github_repository},
@@ -23,7 +24,10 @@ pub struct Autoscaler {
   http:           reqwest::Client,
   pool:           PgPool,
   agent_pool:     Arc<AgentPool>,
+  /// Launches whose agent has not registered yet.
   inflight:       VecDeque<InflightLaunch>,
+  /// Live agents that already released their launch reservation.
+  seen_agents:    HashSet<Uuid>,
   last_scale_up:  Option<Instant>,
   shutdown_token: CancellationToken,
 }
@@ -95,6 +99,7 @@ impl Autoscaler {
       pool,
       agent_pool,
       inflight: VecDeque::new(),
+      seen_agents: HashSet::new(),
       last_scale_up: None,
       shutdown_token,
     })
@@ -147,16 +152,15 @@ impl Autoscaler {
     let mut dispatch_error = None;
     if !self.in_cooldown() {
       let pending = demand.eligible_pending as u32;
-      // A registered launch already shows in live_capacity, so only count
-      // inflight launches without an agent yet.
-      let pending_inflight =
-        (self.inflight.len() as u32).saturating_sub(demand.live_agents);
+      // A registered launch already shows in live_capacity; `inflight` holds
+      // only launches without an agent yet.
+      let pending_inflight = self.inflight.len() as u32;
       let available = demand.live_capacity.saturating_add(pending_inflight);
       let deficit = pending.saturating_sub(available);
       let remaining_inflight = self
         .cfg
         .max_inflight
-        .saturating_sub(self.inflight.len() as u32);
+        .saturating_sub(pending_inflight.saturating_add(demand.live_agents));
       let launches = deficit.min(remaining_inflight);
 
       for _ in 0..launches {
@@ -209,7 +213,16 @@ impl Autoscaler {
     })
   }
 
-  async fn demand(&self) -> misstep::Result<Demand> {
+  /// Release one launch reservation per newly registered agent. Keeping it
+  /// until the TTL would block new runners long after a short-lived one left.
+  fn settle_registered(&mut self, live: HashSet<Uuid>) {
+    let registered = live.difference(&self.seen_agents).count();
+    let settled = registered.min(self.inflight.len());
+    self.inflight.drain(..settled);
+    self.seen_agents = live;
+  }
+
+  async fn demand(&mut self) -> misstep::Result<Demand> {
     let pr_workflow = self.cfg.pull_request_workflow_ref();
     let project_ids: Vec<_> = repo::projects::list(&self.pool, i64::MAX, 0)
       .await?
@@ -340,6 +353,7 @@ impl Autoscaler {
       })
       .collect();
     let live_agents = live.len() as u32;
+    self.settle_registered(live.iter().map(|agent| agent.machine_id).collect());
 
     let mut live_slots = Vec::new();
     for agent in &live {
@@ -383,7 +397,6 @@ impl Autoscaler {
     }
 
     let inflight_capacity = (self.inflight.len() as u32)
-      .saturating_sub(live_agents)
       .saturating_mul(self.cfg.max_jobs);
     let overflow_count = calculate_overflow_count(
       &eligible_requirements,
@@ -602,10 +615,47 @@ mod tests {
           .checked_sub(Duration::from_secs(2))
           .expect("two seconds before now should be representable"),
       }]),
+      seen_agents:    HashSet::new(),
       last_scale_up:  None,
       shutdown_token: CancellationToken::new(),
     };
     autoscaler.prune_inflight();
+    assert!(autoscaler.inflight.is_empty());
+  }
+
+  #[tokio::test]
+  async fn registered_agents_release_their_reservation_once() {
+    let launch = || {
+      InflightLaunch {
+        launched_at: Instant::now(),
+      }
+    };
+    let mut autoscaler = Autoscaler {
+      cfg:            EphemeralPoolConfig::default(),
+      http:           test_http_client(),
+      pool:           circus_common::build_pool(
+        "postgres://localhost/circus",
+        1,
+      )
+      .expect("lazy pool should construct"),
+      agent_pool:     AgentPool::new(),
+      inflight:       VecDeque::from([launch(), launch()]),
+      seen_agents:    HashSet::new(),
+      last_scale_up:  None,
+      shutdown_token: CancellationToken::new(),
+    };
+    let first = Uuid::from_u128(1);
+    autoscaler.settle_registered(HashSet::from([first]));
+    assert_eq!(autoscaler.inflight.len(), 1);
+    autoscaler.settle_registered(HashSet::from([first]));
+    assert_eq!(autoscaler.inflight.len(), 1);
+    // The runner finished: no phantom reservation stays behind.
+    autoscaler.settle_registered(HashSet::new());
+    assert_eq!(autoscaler.inflight.len(), 1);
+    autoscaler.settle_registered(HashSet::from([
+      Uuid::from_u128(2),
+      Uuid::from_u128(3),
+    ]));
     assert!(autoscaler.inflight.is_empty());
   }
 
@@ -642,6 +692,7 @@ mod tests {
       .expect("lazy pool should construct"),
       agent_pool:     AgentPool::new(),
       inflight:       VecDeque::new(),
+      seen_agents:    HashSet::new(),
       last_scale_up:  Some(Instant::now()),
       shutdown_token: CancellationToken::new(),
     };
