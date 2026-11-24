@@ -16,8 +16,8 @@ correct existing behaviour, "Changed" for updates to existing behaviour, and
 - Generic webhooks can receive an `evaluation_finished` event once all of an
   evaluation's top-level jobs finished (`evaluation_events`, and
   `[notifications] webhook_evaluation_events` for the instance webhook), with
-  branch, pull request, source scope and a job summary. The instance webhook
-  can read its HMAC key from `webhook_secret_file` on every delivery, and
+  branch, pull request, source scope and a job summary. The instance webhook can
+  read its HMAC key from `webhook_secret_file` on every delivery, and
   `webhook_build_events` turns its per-build events off.
 - Dashboard OIDC login with named providers, group access rules, and global role
   mappings.

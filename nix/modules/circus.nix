@@ -383,12 +383,14 @@
     serviceFiles "circus-server"
     ((builtins.removeAttrs cfg.settings ["notifications" "queue_runner"])
       // {
-        server = (cfg.settings.server or {}) // lib.optionalAttrs (qemuOverflow != null) {
-          qemu_overflow_status = {
-            inherit (qemuOverflow.qemu_overflow) status_file;
-            status_ttl_secs = qemuOverflow.qemu_overflow.status_ttl_secs or 60;
+        server =
+          (cfg.settings.server or {})
+          // lib.optionalAttrs (qemuOverflow != null) {
+            qemu_overflow_status = {
+              inherit (qemuOverflow.qemu_overflow) status_file;
+              status_ttl_secs = qemuOverflow.qemu_overflow.status_ttl_secs or 60;
+            };
           };
-        };
         cache = builtins.removeAttrs cfg.settings.cache ["secret_key_file"];
         signing = builtins.removeAttrs cfg.settings.signing ["key_file"];
       });

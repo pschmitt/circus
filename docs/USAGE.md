@@ -783,13 +783,13 @@ A generic webhook receives one JSON `POST` per finished top-level build
 (`"event": "build_finished"`). It can also receive one per evaluation
 (`"event": "evaluation_finished"`) once the evaluation is complete and none of
 its top-level jobs is pending or running any more. That event carries
-`evaluation_id`, `status` (`success`, `failure`, `cancelled` or `partial`),
-a `jobs` summary (`total`, `succeeded`, `failed`, `cancelled`, `skipped`),
+`evaluation_id`, `status` (`success`, `failure`, `cancelled` or `partial`), a
+`jobs` summary (`total`, `succeeded`, `failed`, `cancelled`, `skipped`),
 `project_name`, `project_url`, `jobset_name`, `commit_hash`, `branch`,
 `pr_number`, `source_scope` and `superseded_by`. It can be delivered more than
-once; deduplicate by `evaluation_id`. Evaluation events skip the retry queue
-and are retried three times right away, so a consumer that must not miss one
-should also poll the API.
+once; deduplicate by `evaluation_id`. Evaluation events skip the retry queue and
+are retried three times right away, so a consumer that must not miss one should
+also poll the API.
 
 For a project webhook, set `"evaluation_events": true` (and optionally
 `"build_events": false`) in its config. For the instance webhook:
@@ -819,10 +819,10 @@ POST /api/v1/webhooks/{project_id}/forgejo
 POST /api/v1/webhooks/github
 ```
 
-The GitHub App webhook endpoint routes push and pull-request events by an
-exact match between the payload's `repository.full_name` and one configured
-GitHub project repository. It verifies the matching project's GitHub webhook
-secret before creating evaluations. The project-scoped GitHub endpoint remains
+The GitHub App webhook endpoint routes push and pull-request events by an exact
+match between the payload's `repository.full_name` and one configured GitHub
+project repository. It verifies the matching project's GitHub webhook secret
+before creating evaluations. The project-scoped GitHub endpoint remains
 available for existing integrations.
 
 Webhook configs are managed per project:
@@ -981,29 +981,28 @@ circusctl evaluations submit --jobset-id <jobset-id> \
   --checkout /path/to/checkout --termuxpp --hosts phone-a,phone-b
 ```
 
-Enable this for specific repository URLs with
-`server.snapshot_repositories`. Configure `server.max_body_size` to at
-least 16777216 to accept the full 16 MiB snapshot limit. The API uses
+Enable this for specific repository URLs with `server.snapshot_repositories`.
+Configure `server.max_body_size` to at least 16777216 to accept the full 16 MiB
+snapshot limit. The API uses
 `POST /api/v1/evaluations/snapshot?jobset_id=…&hosts=…` with a tar body. It
 requires an admin API key and an enabled branch-based flake jobset.
 
 The client includes the current contents of tracked and non-ignored untracked
-files. The snapshot and its lock file are retained with the evaluation so it
-can be restarted. The evaluator creates an internal Git revision for pure
-flake evaluation. The caller's checkout and remote stay untouched.
+files. The snapshot and its lock file are retained with the evaluation so it can
+be restarted. The evaluator creates an internal Git revision for pure flake
+evaluation. The caller's checkout and remote stay untouched.
 
 Snapshot jobs and their queued prerequisites start at priority 10. Use
-`--normal-priority` for the ordinary queue priority. Snapshot builds use
-the configured jobset's eligible builders. Commit notifications, automatic
-channel promotion, and repository-driven jobset sync are skipped.
+`--normal-priority` for the ordinary queue priority. Snapshot builds use the
+configured jobset's eligible builders. Commit notifications, automatic channel
+promotion, and repository-driven jobset sync are skipped.
 
 Pass `--pool <name>` to restrict the host closure to one configured ephemeral
 pool, or `--agent <uuid>` to restrict it to one registered agent. A pinned
 closure stays queued when its target has no capacity. Specify `--agent` with
 `--fallback` to allow other compatible workers. Prerequisites can use any
-compatible builder. Use `--front` to put the evaluation and its eligible
-builds ahead of ordinary queued work. Running work continues.
-
+compatible builder. Use `--front` to put the evaluation and its eligible builds
+ahead of ordinary queued work. Running work continues.
 
 Set `evaluator.snapshot_substituters` to the binary caches reachable by your
 snapshot builders when they run on other machines. This keeps evaluator-local

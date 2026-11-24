@@ -404,9 +404,11 @@
         ];
 
         text = ''
+          # Migrations are checksummed: editing an applied one, even only its
+          # whitespace, stops Circus from starting.
           format_file() {
             case "''${1#./}" in
-              db/* | */db/* | queries/* | */queries/* | docs/API.md) ;;
+              */migrations/migrations/* | db/* | */db/* | queries/* | */queries/* | docs/API.md) ;;
               *.nix) alejandra -q "$1" ;;
               *.toml) taplo fmt "$1" ;;
               *.css) prettier --write "$1" ;;
