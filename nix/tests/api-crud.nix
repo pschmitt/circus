@@ -239,6 +239,14 @@ testers.runNixOSTest {
         )
         assert code.strip() == "403", f"Expected 403 for read-only eval trigger, got {code.strip()}"
 
+    with subtest("Restart evaluation checks permission and existence"):
+        restart_url = "http://127.0.0.1:3000/api/v1/evaluations"
+        status_cmd = "curl -s -o /dev/null -w '%{http_code}' -X POST "
+        code = machine.succeed(f"{status_cmd} {restart_url}/{test_eval_id}/restart {ro_header}")
+        assert code.strip() == "403", f"Expected 403, got {code.strip()}"
+        code = machine.succeed(f"{status_cmd} {restart_url}/00000000-0000-0000-0000-000000000000/restart {auth_header}")
+        assert code.strip() == "404", f"Expected 404, got {code.strip()}"
+
     # Build lifecycle (restart, bump)
     # Create a build via SQL since builds are normally created by the evaluator
     with subtest("Create test build via SQL"):

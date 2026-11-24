@@ -278,6 +278,33 @@ async fn submit_snapshot(
   }
 }
 
+async fn restart_evaluation(
+  extensions: Extensions,
+  State(state): State<AppState>,
+  Path(id): Path<Uuid>,
+) -> Result<Json<Evaluation>, ApiError> {
+  permissions::require_api(&extensions, Permission::RestartJobs)?;
+  // Unknown ids are 404, not a conflict.
+  repo::evaluations::get(&state.pool, id).await?;
+  let evaluation = repo::evaluations::restart(&state.pool, id)
+    .await?
+    .ok_or_else(|| {
+      ApiError(circus_common::CiError::Conflict(
+        "Only failed, cancelled, or timed-out evaluations with active jobsets \
+         can be restarted"
+          .to_string(),
+      ))
+    })?;
+
+  tracing::info!(
+    eval_id = %id,
+    commit = %evaluation.commit_hash,
+    "Evaluation restarted"
+  );
+
+  Ok(Json(evaluation))
+}
+
 #[derive(Debug, Deserialize)]
 struct CompareParams {
   to: Uuid,
@@ -397,6 +424,7 @@ pub fn router() -> Router<AppState> {
     .route("/evaluations", get(list_evaluations))
     .route("/evaluations/{id}", get(get_evaluation))
     .route("/evaluations/{id}/compare", get(compare_evaluations))
+    .route("/evaluations/{id}/restart", post(restart_evaluation))
     .route("/evaluations/trigger", post(trigger_evaluation))
     .route(
       "/evaluations/snapshot",

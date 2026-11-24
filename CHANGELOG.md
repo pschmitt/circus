@@ -21,6 +21,8 @@ correct existing behaviour, "Changed" for updates to existing behaviour, and
   `webhook_build_events` turns its per-build events off.
 - Dashboard OIDC login with named providers, group access rules, and global role
   mappings.
+- `circusctl evaluations restart` and `POST /api/v1/evaluations/{id}/restart`
+  requeue a failed, cancelled, or timed-out evaluation.
 - Jobsets can set `build_timeout` in seconds to override
   `queue_runner.build_timeout` for their builds.
 - Agents can join with a shared `[queue_runner.rpc].join_tokens` token. The
@@ -40,6 +42,9 @@ correct existing behaviour, "Changed" for updates to existing behaviour, and
 
 ### Fixed
 
+- Evaluation workers are now recycled at three quarters of
+  `evaluator.memory_limit_mb`. They used to abort at the hard limit first and
+  lose the job they were evaluating.
 - The sign-in button on private dashboard pages now opens the login page, so
   OIDC providers are offered there too.
 - `logs.compress` previously had no effect. When it is set, completed build logs

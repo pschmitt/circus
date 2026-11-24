@@ -75,6 +75,7 @@ webhooks, health, metrics, and cache routes live outside that API key gate.
 | POST | `/api/v1/evaluations/trigger` | Trigger an evaluation | 202 |
 | GET | `/api/v1/evaluations/{id}` | Get an evaluation | 200 |
 | GET | `/api/v1/evaluations/{id}/compare` | Compare an evaluation against another | 200 |
+| POST | `/api/v1/evaluations/{id}/restart` | Restart a failed, cancelled, or timed-out evaluation | 200 |
 | GET | `/api/v1/me` | Get the current user | 200 |
 | PUT | `/api/v1/me` | Update the current user | 200 |
 | POST | `/api/v1/me/password` | Change the current user's password | 204 |

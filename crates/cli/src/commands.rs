@@ -403,6 +403,8 @@ pub(super) enum EvaluationCommand {
     #[pound(long, requires = pr_number)]
     pr_action:      Option<String>,
   },
+  /// Restart a failed, cancelled, or timed-out evaluation.
+  Restart { id: Uuid },
 }
 
 #[derive(Parse)]

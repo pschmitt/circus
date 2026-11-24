@@ -1357,6 +1357,34 @@
         }
       }
     },
+    "/evaluations/{id}/restart": {
+      "post": {
+        "summary": "Restart a failed, cancelled, or timed-out evaluation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restarted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Evaluation" }
+              }
+            }
+          },
+          "409": {
+            "description": "Evaluation is not restartable"
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health check with database and service status",

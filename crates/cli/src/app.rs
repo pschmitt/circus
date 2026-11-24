@@ -620,6 +620,22 @@ impl CommandRunner {
         );
         print_page(&response);
       },
+      EvaluationCommand::Restart { id } => {
+        let response = self
+          .api
+          .post(&format!("api/v1/evaluations/{id}/restart"), json!({}), true)
+          .await?;
+        if self.json_output {
+          return print_json(&response);
+        }
+        println!("Restarted evaluation {id}");
+        print_table(&["ID", "Jobset", "Commit", "Status"], &[vec![
+          field(&response, "id"),
+          field(&response, "jobset_id"),
+          short(&field(&response, "commit_hash"), 12),
+          field(&response, "status"),
+        ]]);
+      },
       EvaluationCommand::Trigger {
         jobset_id,
         commit_hash,

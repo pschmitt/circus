@@ -14,9 +14,12 @@ impl MemoryLimit {
     Self(limit_mb)
   }
 
+  /// Memory at which evix recycles a worker between attributes. Kept below
+  /// the hard `RLIMIT_DATA`: with equal values the worker aborts with
+  /// `bad_alloc` before it can ever be recycled, losing the attribute.
   pub(crate) fn evix_mb(self) -> io::Result<usize> {
     self.0.map_or(Ok(DEFAULT_EVIX_MEMORY_MB), |limit| {
-      usize::try_from(limit)
+      usize::try_from(limit - limit / 4)
         .map_err(|_| io::Error::other("evaluator memory limit is too large"))
     })
   }
@@ -137,7 +140,7 @@ mod tests {
   #[test]
   fn evix_keeps_legacy_default_without_a_hard_limit() {
     assert_eq!(MemoryLimit::new(None).evix_mb().unwrap(), 4096);
-    assert_eq!(MemoryLimit::new(Some(512)).evix_mb().unwrap(), 512);
+    assert_eq!(MemoryLimit::new(Some(512)).evix_mb().unwrap(), 384);
   }
 
   #[cfg(unix)]
