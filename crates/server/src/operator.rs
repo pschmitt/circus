@@ -300,6 +300,11 @@ impl OperatorQueueSystem {
   }
 }
 
+/// Workers shown on the dashboard overview.
+const OVERVIEW_WORKERS: usize = 8;
+/// More builds than can run at once.
+const RUNNING_BUILDS_LIMIT: i64 = 10_000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorWorker {
   pub name:         String,
@@ -311,7 +316,13 @@ pub struct OperatorWorker {
 }
 
 impl OperatorWorker {
-  async fn list(state: &AppState) -> Result<(Vec<Self>, i64, i64)> {
+  /// The first `limit` workers, connected ones first. `current_jobs` counts
+  /// the builds assigned to a worker even before its next heartbeat reports
+  /// them.
+  async fn list(
+    state: &AppState,
+    limit: usize,
+  ) -> Result<(Vec<Self>, i64, i64)> {
     let worker_sessions =
       circus_common::repo::builder_sessions::list(&state.pool)
         .await
@@ -319,32 +330,50 @@ impl OperatorWorker {
     let worker_total = worker_sessions.len() as i64;
     let worker_online =
       worker_sessions.iter().filter(|w| w.connected).count() as i64;
+    let running = circus_common::repo::builds::list_filtered(
+      &state.pool,
+      None,
+      Some("running"),
+      None,
+      None,
+      RUNNING_BUILDS_LIMIT,
+      0,
+    )
+    .await
+    .map_err(ApiError)?;
+    let mut assigned = HashMap::<Uuid, i32>::new();
+    for machine_id in running.iter().filter_map(|b| b.agent_machine_id) {
+      *assigned.entry(machine_id).or_default() += 1;
+    }
     let workers = worker_sessions
       .iter()
-      .take(8)
+      .take(limit)
       .map(|w| {
+        let current_jobs = w
+          .current_jobs
+          .max(assigned.get(&w.machine_id).copied().unwrap_or(0));
         let status_text = if !w.connected {
           "offline"
-        } else if w.current_jobs > 0 {
+        } else if current_jobs > 0 {
           "busy"
         } else {
           "idle"
         };
         Self {
-          name:         w.name.clone(),
-          system:       if w.systems.is_empty() {
+          name: w.name.clone(),
+          system: if w.systems.is_empty() {
             "unknown".into()
           } else {
             w.systems.join(", ")
           },
-          status_text:  status_text.into(),
+          status_text: status_text.into(),
           status_class: if w.connected {
             "running".into()
           } else {
             "skipped".into()
           },
-          current_jobs: w.current_jobs,
-          max_jobs:     w.max_jobs,
+          current_jobs,
+          max_jobs: w.max_jobs,
         }
       })
       .collect();
@@ -406,7 +435,7 @@ pub async fn overview(
   let projects = OperatorProject::list(state, include_hidden, false).await?;
   let queue_by_system = OperatorQueueSystem::from_pending(&pending_raw, None);
   let (workers, worker_online, worker_total) =
-    OperatorWorker::list(state).await?;
+    OperatorWorker::list(state, OVERVIEW_WORKERS).await?;
 
   Ok(OperatorOverview {
     total_builds: build_stats.total_builds.unwrap_or(0),
@@ -574,7 +603,7 @@ async fn current_qemu_overflow_count(state: &AppState) -> Option<u32> {
 ///
 /// Returns an error when builder or agent session queries fail.
 pub async fn worker_summary(state: &AppState) -> Result<Vec<OperatorWorker>> {
-  let (workers, ..) = OperatorWorker::list(state).await?;
+  let (workers, ..) = OperatorWorker::list(state, usize::MAX).await?;
   Ok(workers)
 }
 

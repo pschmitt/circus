@@ -68,6 +68,11 @@
         commonArgs = commonArgs // {doCheck = false;};
       };
     };
+    # Nix's FdSource::hasData() uses select(), which aborts the evaluator once a
+    # file descriptor reaches 1024 (it keeps every tarball cache pack open).
+    # Backport of NixOS/nix 498f96d145; drop it once 2.34 includes it.
+    nixFor = pkgs:
+      pkgs.nixVersions.nix_2_34.appendPatches [./nix/patches/nix-fdsource-poll.patch];
     mkPackageSet = pkgs: let
       craneLib = crane.mkLib pkgs;
       agent = mkAgent pkgs;
@@ -80,7 +85,7 @@
         inherit src;
         strictDeps = true;
         nativeBuildInputs = with pkgs.buildPackages; [pkg-config capnproto];
-        buildInputs = with pkgs; [sqlite nixVersions.nix_2_34.dev xz zstd] ++ lib.optionals stdenv.hostPlatform.isLinux [glibc.dev];
+        buildInputs = with pkgs; [sqlite (nixFor pkgs).dev xz zstd] ++ lib.optionals stdenv.hostPlatform.isLinux [glibc.dev];
         env = {
           ZSTD_SYS_USE_PKG_CONFIG = "1";
           LIBCLANG_PATH = "${pkgs.buildPackages.llvmPackages.libclang.lib}/lib";
@@ -372,7 +377,7 @@
           (cornucopiaFor pkgs)
 
           # circus-evaluator builds evix's Nix C bindings.
-          nixVersions.nix_2_34.dev
+          (nixFor pkgs).dev
 
           # Additional Cargo tooling
           clippy

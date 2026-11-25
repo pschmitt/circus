@@ -42,6 +42,10 @@ correct existing behaviour, "Changed" for updates to existing behaviour, and
 
 ### Fixed
 
+- The evaluator no longer aborts ("bit out of range 0 - FD_SETSIZE") once it
+  holds 1024 files open; Nix is built with the upstream `poll()` fix.
+- `GET /api/v1/operator/workers` lists every worker, not only the first eight,
+  and counts assigned builds before the worker's next heartbeat.
 - A GitHub Actions launch reservation ends when its agent registers. Finished
   runners used to block new ones until `inflight_ttl_secs`.
 - `GET /api/v1/operator/queue` no longer counts only the first 100 pending
